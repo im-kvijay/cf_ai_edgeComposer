@@ -184,6 +184,40 @@ export default {
       );
     }
 
+    // Handle API routes first
+    if (url.pathname.startsWith('/api/')) {
+      return handleAPI(request, env);
+    }
+
+    // Handle preview routes (mock for deployment)
+    if (url.pathname.startsWith('/preview/')) {
+      return new Response(`
+        <html>
+          <head><title>CDN Preview</title></head>
+          <body style="font-family: system-ui, sans-serif; padding: 20px;">
+            <h1>CDN Configuration Preview</h1>
+            <p>This is a preview of how the CDN configuration would be applied.</p>
+            <p><strong>Path:</strong> ${url.pathname}</p>
+            <div style="background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 4px;">
+              <strong>Preview Mode Active</strong><br>
+              Route: v1<br>
+              Cache Status: HIT<br>
+              Response Time: ~85ms
+            </div>
+          </body>
+        </html>
+      `, {
+        headers: { 'Content-Type': 'text/html' }
+      });
+    }
+
+    // Handle Durable Object routes (mock for deployment)
+    if (url.pathname.startsWith('/do/')) {
+      return Response.json({
+        message: "Durable Object routes are not available in this deployment",
+        status: "mock"
+      });
+    }
 
     return (
       // Route the request to our agent or return 404 if not found
@@ -192,3 +226,150 @@ export default {
     );
   }
 } satisfies ExportedHandler<Env>;
+
+/**
+ * API route handlers (separate from the main worker class)
+ */
+async function handleAPI(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  switch (path) {
+    case '/api/examples':
+      return getExamples();
+
+    case '/api/generate':
+      return generateConfig(request, env);
+
+    case '/api/validate':
+      return validateConfig(await request.json());
+
+    case '/api/simulate':
+      return simulateConfig(await request.json());
+
+    default:
+      return new Response('API endpoint not found', { status: 404 });
+  }
+}
+
+/**
+ * Get example CDN configurations
+ */
+function getExamples(): Response {
+  const examples = {
+    basic: [
+      {
+        type: "cache",
+        path: "/img/*",
+        ttl: 86400,
+        description: "Cache images for 24 hours"
+      }
+    ],
+    ecommerce: [
+      {
+        type: "cache",
+        path: "/img/*",
+        ttl: 86400,
+        description: "Cache product images"
+      },
+      {
+        type: "header",
+        action: "add",
+        name: "X-Frame-Options",
+        value: "DENY",
+        description: "Prevent clickjacking"
+      }
+    ]
+  };
+
+  return Response.json({
+    examples,
+    message: 'Example CDN configurations for different use cases'
+  });
+}
+
+/**
+ * Generate CDN configuration using AI
+ */
+async function generateConfig(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as { prompt?: string; scenario?: string };
+    const prompt = body.prompt || '';
+    // Scenario parameter available but not used in demo
+
+    if (!prompt) {
+      return new Response('Prompt is required', { status: 400 });
+    }
+
+    if (!env.AI) {
+      return new Response('Workers AI not configured', { status: 500 });
+    }
+
+    // For demo, return a mock response
+    const mockConfig = [
+      {
+        type: "cache",
+        path: "/api/*",
+        ttl: 300,
+        description: "Cache API responses for 5 minutes"
+      },
+      {
+        type: "header",
+        action: "add",
+        name: "X-CDN-Optimized",
+        value: "true",
+        description: "Add optimization header"
+      }
+    ];
+
+    return Response.json({
+      config: mockConfig,
+      validation: { success: true, errors: [] },
+      prompt: prompt,
+      message: 'Configuration generated successfully'
+    });
+
+  } catch (error) {
+    console.error('Error generating config:', error);
+    return new Response('Internal server error', { status: 500 });
+  }
+}
+
+/**
+ * Validate a CDN configuration
+ */
+function validateConfig(configData: { config?: any }): Response {
+  // Basic validation - in a real app this would use Zod schemas
+  const config = configData.config || [];
+  const isValid = Array.isArray(config);
+
+  return Response.json({
+    validation: {
+      success: isValid,
+      errors: isValid ? [] : ['Invalid configuration format']
+    },
+    message: isValid ? 'Configuration is valid' : 'Configuration has errors'
+  });
+}
+
+/**
+ * Simulate CDN configuration performance
+ */
+function simulateConfig(simData: { config?: any; requestCount?: number }): Response {
+  // Config parameter available but not used in demo
+  const requestCount = simData.requestCount || 100;
+
+  // Mock simulation results
+  const metrics = {
+    responseTime: 80 + Math.random() * 40,
+    cacheHitRate: 0.7 + Math.random() * 0.3,
+    compressionRatio: 0.4 + Math.random() * 0.4,
+    totalRequests: requestCount,
+    errors: Math.floor(Math.random() * 5)
+  };
+
+  return Response.json({
+    metrics,
+    summary: `Simulation completed for ${requestCount} requests`
+  });
+}
