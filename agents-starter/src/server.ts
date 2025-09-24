@@ -17,7 +17,8 @@ import {
 import { createWorkersAI } from "workers-ai-provider";
 import { processToolCalls, cleanupMessages } from "./utils";
 import { tools, executions } from "./tools";
-import { createCDNTools, type CDNRule, type ToolTraceEntry, type TodoEntry, type ResearchNote } from "./cdn-tools";
+import { createCDNTools } from "./cdn-tools";
+import type { CDNRule, ToolTraceEntry, TodoEntry, ResearchNote } from "@/shared-types";
 // import { env } from "cloudflare:workers";
 
 // const model = openai("gpt-4o-2024-11-20"); // OpenAI provider (disabled)
@@ -154,7 +155,7 @@ export default {
 
     if (url.pathname === "/ai-test") {
       try {
-        const modelParam = "@cf/openai/gpt-oss-120b";
+        const modelParam = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
         const body = { prompt: "Say hello from Workers AI" } as const;
         const runPromise = env.AI.run(modelParam as keyof AiModels, body as never);
 
@@ -253,6 +254,41 @@ export default {
   }
 } satisfies ExportedHandler<Env>;
 
+// Extract the first well-formed JSON array from arbitrary text.
+function extractFirstJsonArray(text: string): string | null {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '[') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === ']') {
+      if (depth > 0) depth--;
+      if (depth === 0 && start !== -1) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * API route handlers (separate from the main worker class)
  */
@@ -350,15 +386,90 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
       `Return a compact JSON array. Do not include any explanation or markdown.`;
 
-    // Tool calling approach: let the model call structured tools to build a plan.
-    // Use generateText (non-streaming) so tool calls are fully executed before returning.
+    // Tool calling approach is disabled for GPT-OSS Harmony; use strict JSON fallback.
     const plan: CDNRule[] = [];
     const trace: ToolTraceEntry[] = [];
     const todos: TodoEntry[] = [];
     const notes: ResearchNote[] = [];
-    const cdnTools = createCDNTools(plan, trace, todos, notes);
 
-    const model = "@cf/openai/gpt-oss-120b" as keyof AiModels;
+    // Force non-Harmony model for stability
+    const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as keyof AiModels;
+    const isHarmony = false;
+
+    if (isHarmony) {
+      try {
+        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
+          `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
+          `- cache: path (string), ttl (number), description (string)\n` +
+          `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
+          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
+          `- access: allow (string[]), deny (string[]), description (string?)\n` +
+          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
+          `Return ONLY the array, wrapped between <JSON> and </JSON>.`;
+
+        const rawResponse = await env.AI.run(model, {
+          input: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
+          max_tokens: 800,
+          temperature: 0
+        } as never);
+
+        const raw = (rawResponse as any)?.output?.[0]?.text
+          ?? (rawResponse as any)?.output_text
+          ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
+
+        let arraySource: string | null = null;
+        if (typeof raw === 'string') {
+          const tag = raw.match(/<JSON>([\s\S]*?)<\/JSON>/);
+          if (tag?.[1]) {
+            arraySource = tag[1].trim();
+          } else {
+            arraySource = extractFirstJsonArray(raw);
+          }
+        }
+
+        if (arraySource) {
+          const parsed = JSON.parse(arraySource);
+          if (Array.isArray(parsed)) {
+            for (const r of parsed) {
+              plan.push({ id: crypto.randomUUID(), ...(r as object) } as CDNRule);
+            }
+            trace.push({ name: 'harmony_json_parse', input: { raw }, output: parsed });
+          }
+        }
+      } catch (e) {
+        console.warn('harmony json generation failed', e);
+      }
+
+      // Also produce a conversational assistant reply for the UI chat
+      let assistantText = '';
+      try {
+        const chatResp = await env.AI.run(model, {
+          input: `SYSTEM:\nYou are a helpful CDN assistant. Reply conversationally about the configuration changes. Do not include code blocks or JSON.\n\nUSER:\n${prompt}`,
+          max_tokens: 300,
+          temperature: 0.2
+        } as never);
+        assistantText = (chatResp as any)?.output?.[0]?.text
+          ?? (chatResp as any)?.output_text
+          ?? (typeof chatResp === 'string' ? chatResp : '');
+        if (typeof assistantText === 'string') assistantText = assistantText.trim();
+      } catch (e) {
+        console.warn('harmony chat generation failed', e);
+      }
+
+      return Response.json({
+        config: plan,
+        trace,
+        todos,
+        notes,
+        assistant: assistantText || '',
+        validation: { success: true, errors: [] },
+        prompt,
+        message: 'Configuration generated successfully (harmony)'
+      });
+    }
+
+    // Non-harmony models can use tools via ai-sdk
+    const cdnTools = createCDNTools(plan, trace, undefined, notes);
     const workersai = createWorkersAI({ binding: env.AI });
     const modelFn = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(model);
 
@@ -395,7 +506,8 @@ Guidance:
           `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
           `- access: allow (string[]), deny (string[]), description (string?)\n` +
           `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
-          `Return a compact JSON array. Do not include any explanation or markdown.`;
+          `Return a compact JSON array. Do not include any explanation or markdown.\n` +
+          `Wrap the JSON array between <JSON> and </JSON> tags and output nothing else.`;
 
         const rawResponse = await env.AI.run(model, {
           input: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
@@ -406,9 +518,20 @@ Guidance:
         const raw = (rawResponse as any)?.output?.[0]?.text
           ?? (rawResponse as any)?.output_text
           ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
-        const match = typeof raw === 'string' ? raw.match(/\[[\s\S]*\]/) : null;
-        if (match) {
-          const parsed = JSON.parse(match[0]);
+
+        let arraySource: string | null = null;
+        if (typeof raw === 'string') {
+          const tag = raw.match(/<JSON>([\s\S]*?)<\/JSON>/);
+          if (tag && tag[1]) {
+            arraySource = tag[1].trim();
+          } else {
+            const bracket = raw.match(/\[[\s\S]*\]/);
+            if (bracket && bracket[0]) arraySource = bracket[0];
+          }
+        }
+
+        if (arraySource) {
+          const parsed = JSON.parse(arraySource);
           if (Array.isArray(parsed)) {
             for (const r of parsed) {
               const withId = { id: crypto.randomUUID(), ...(r as object) } as CDNRule;

@@ -1,8 +1,8 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod/v3";
-import type { CDNRule, ResearchNote, TodoEntry, ToolTraceEntry } from "@/shared-types";
+import type { CDNRule, ResearchNote, ToolTraceEntry } from "@/shared-types";
 
-export function createCDNTools(plan: CDNRule[], trace?: ToolTraceEntry[], todos?: TodoEntry[], notes?: ResearchNote[]) {
+export function createCDNTools(plan: CDNRule[], trace?: ToolTraceEntry[], _todos?: unknown, notes?: ResearchNote[]) {
   const record = (label: string, input: unknown, output: unknown, status: ToolTraceEntry["status"] = "success") => {
     try {
       trace?.push({
@@ -93,35 +93,7 @@ export function createCDNTools(plan: CDNRule[], trace?: ToolTraceEntry[], todos?
     }
   });
 
-  const addTodo = tool({
-    description: "Create a visible todo item for the user",
-    inputSchema: z.object({ text: z.string() }),
-    execute: async ({ text }) => {
-      const entry: TodoEntry = { id: crypto.randomUUID(), text, status: "pending" };
-      todos?.push(entry);
-      record("addTodo", { text }, entry);
-      return entry;
-    }
-  });
-
-  const completeTodo = tool({
-    description: "Mark a todo item as done by id or exact text",
-    inputSchema: z.object({ id: z.string().optional(), text: z.string().optional() }),
-    execute: async ({ id, text }) => {
-      let updated: TodoEntry | undefined;
-      if (todos && todos.length > 0) {
-        for (const t of todos) {
-          if ((id && t.id === id) || (text && t.text === text)) {
-            t.status = "done";
-            updated = t;
-            break;
-          }
-        }
-      }
-      record("completeTodo", { id, text }, updated ?? null, updated ? "success" : "error");
-      return updated ?? null;
-    }
-  });
+  // Removed todo/completeTodo tools per request
 
   const addResearchNote = tool({
     description: "Add a research note that supports the chosen optimizations",
@@ -140,8 +112,6 @@ export function createCDNTools(plan: CDNRule[], trace?: ToolTraceEntry[], todos?
     addRouteRule,
     addAccessRule,
     addPerformanceRule,
-    addTodo,
-    completeTodo,
     addResearchNote
   } satisfies ToolSet;
 }
