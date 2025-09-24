@@ -15,3 +15,7 @@ suggest specific portions we could use in this project
 execute.
 
 correct errors and complete a code audit as you hook up portions of vibeSDK. inform me of every change you made and its purpose. then, summarize the state of the entire codebase and project.
+
+implement gptoss in place of llama 3.3. ive attatched the openAI harmony prompt system for you.
+
+revert. add a framework (names and basic info) for more tools that could aid the usefulness of the project

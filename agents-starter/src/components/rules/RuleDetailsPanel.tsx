@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Button } from "@/components/button/Button";
 import { Card } from "@/components/card/Card";
-import type { CDNRule } from "@/cdn-tools";
+import type { CDNRule } from "@/shared-types";
 import type { ChecklistItem } from "@/shared-types";
 
 interface RuleDetailsPanelProps {
@@ -24,6 +24,7 @@ export function RuleDetailsPanel({
   linkedChecklistItem
 }: RuleDetailsPanelProps) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+  const [filter, setFilter] = useState<string>('all');
 
   const details = useMemo(() => {
     if (!rule) return null;
@@ -43,12 +44,35 @@ export function RuleDetailsPanel({
     onSelectRule(index);
   };
 
+  const filtered = useMemo(() => {
+    if (filter === 'all') return rules;
+    return rules.filter(r => r.type === filter);
+  }, [rules, filter]);
+
+  const counts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of rules) map.set(r.type, (map.get(r.type) ?? 0) + 1);
+    return map;
+  }, [rules]);
+
   return (
     <div className="flex-1 overflow-auto border-b border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">Current Rules</div>
           <div className="text-xs text-neutral-500 dark:text-neutral-400">{rules.length} total rules</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            className="text-xs border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1 bg-white dark:bg-neutral-900"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          >
+            <option value="all">All</option>
+            {[...counts.keys()].map((k) => (
+              <option key={k} value={k}>{k} ({counts.get(k)})</option>
+            ))}
+          </select>
         </div>
         {linkedChecklistItem ? (
           <div className="rounded bg-blue-500/10 px-3 py-1 text-xs text-blue-600 dark:text-blue-300">
@@ -57,13 +81,13 @@ export function RuleDetailsPanel({
         ) : null}
       </div>
 
-      {rules.length === 0 ? (
+      {filtered.length === 0 ? (
         <div className="rounded border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
           No rules applied yet. Generate and apply a plan to populate this panel.
         </div>
       ) : (
         <div className="space-y-3">
-          {rules.map((item, index) => {
+          {filtered.map((item, index) => {
             const isExpanded = expandedIndex === index;
             return (
               <Card

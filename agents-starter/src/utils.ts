@@ -128,3 +128,90 @@ export function cleanupMessages(messages: UIMessage[]): UIMessage[] {
     return !hasIncompleteToolCall;
   });
 }
+
+/**
+ * Parse Llama 3.3 zero-shot function-calling bracket output into structured calls.
+ * Example input:
+ *   [get_weather(city='San Francisco', metric='celsius'), get_weather(city='Seattle')]
+ * Output:
+ *   [{ name: 'get_weather', args: { city: 'San Francisco', metric: 'celsius' } }, ...]
+ */
+export function parseBracketToolCalls(text: string): Array<{ name: string; args: Record<string, unknown> }> {
+  const result: Array<{ name: string; args: Record<string, unknown> }> = [];
+  if (!text) return result;
+
+  const arrayMatch = text.match(/\[([\s\S]*)\]/);
+  if (!arrayMatch) return result;
+  const inner = arrayMatch[1];
+
+  // Split top-level by comma that separates calls (avoid commas inside parentheses)
+  const calls: string[] = [];
+  let buf = '';
+  let depth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === '(') depth++;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      if (buf.trim()) calls.push(buf.trim());
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  if (buf.trim()) calls.push(buf.trim());
+
+  for (const call of calls) {
+    const m = call.match(/^\s*([a-zA-Z_][\w]*)\s*\((.*)\)\s*$/);
+    if (!m) continue;
+    const name = m[1];
+    const argsSrc = m[2].trim();
+    const args: Record<string, unknown> = {};
+    if (argsSrc.length > 0) {
+      // Split on commas at depth 0 for key=value pairs
+      const parts: string[] = [];
+      let pbuf = '';
+      let pdepth = 0;
+      let inStr: false | "'" | '"' = false;
+      for (let i = 0; i < argsSrc.length; i++) {
+        const c = argsSrc[i];
+        if ((c === '"' || c === "'") && !inStr) inStr = c as '"' | "'";
+        else if (inStr && c === inStr) inStr = false;
+        else if (!inStr) {
+          if (c === '(') pdepth++;
+          else if (c === ')') pdepth = Math.max(0, pdepth - 1);
+          else if (c === ',' && pdepth === 0) {
+            if (pbuf.trim()) parts.push(pbuf.trim());
+            pbuf = '';
+            continue;
+          }
+        }
+        pbuf += c;
+      }
+      if (pbuf.trim()) parts.push(pbuf.trim());
+
+      for (const kv of parts) {
+        const eq = kv.indexOf('=');
+        if (eq === -1) continue;
+        const key = kv.slice(0, eq).trim();
+        let valueRaw = kv.slice(eq + 1).trim();
+        // Normalize quotes and simple types
+        if ((valueRaw.startsWith("'") && valueRaw.endsWith("'")) || (valueRaw.startsWith('"') && valueRaw.endsWith('"'))) {
+          valueRaw = valueRaw.slice(1, -1);
+          args[key] = valueRaw;
+        } else if (/^\d+$/.test(valueRaw)) {
+          args[key] = Number(valueRaw);
+        } else if (/^(true|false)$/i.test(valueRaw)) {
+          args[key] = /^true$/i.test(valueRaw);
+        } else if (valueRaw === 'null' || valueRaw === 'None') {
+          args[key] = null;
+        } else {
+          // Fallback to string
+          args[key] = valueRaw;
+        }
+      }
+    }
+    result.push({ name, args });
+  }
+  return result;
+}

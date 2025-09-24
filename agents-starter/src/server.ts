@@ -99,7 +99,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof allTools
           >,
-          stopWhen: stepCountIs(10)
+          stopWhen: stepCountIs(16)
         });
 
         writer.merge(result.toUIMessageStream());
@@ -254,41 +254,6 @@ export default {
   }
 } satisfies ExportedHandler<Env>;
 
-// Extract the first well-formed JSON array from arbitrary text.
-function extractFirstJsonArray(text: string): string | null {
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escape) {
-        escape = false;
-      } else if (ch === '\\') {
-        escape = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-    if (ch === '[') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === ']') {
-      if (depth > 0) depth--;
-      if (depth === 0 && start !== -1) {
-        return text.slice(start, i + 1);
-      }
-    }
-  }
-  return null;
-}
-
 /**
  * API route handlers (separate from the main worker class)
  */
@@ -376,99 +341,15 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       return new Response('Workers AI not configured', { status: 500 });
     }
 
-    // Prompt the Workers AI model to generate ONLY a JSON array of rules
-    const system = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
-      `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
-      `- cache: path (string), ttl (number), description (string)\n` +
-      `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
-      `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
-      `- access: allow (string[]), deny (string[]), description (string?)\n` +
-      `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
-      `Return a compact JSON array. Do not include any explanation or markdown.`;
+    // Guidance string used in fallback mode (built into the prompt below)
 
-    // Tool calling approach is disabled for GPT-OSS Harmony; use strict JSON fallback.
     const plan: CDNRule[] = [];
     const trace: ToolTraceEntry[] = [];
     const todos: TodoEntry[] = [];
     const notes: ResearchNote[] = [];
 
-    // Force non-Harmony model for stability
+    // Use Workers AI model with tool-calling via ai-sdk
     const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as keyof AiModels;
-    const isHarmony = false;
-
-    if (isHarmony) {
-      try {
-        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
-          `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
-          `- cache: path (string), ttl (number), description (string)\n` +
-          `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
-          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
-          `- access: allow (string[]), deny (string[]), description (string?)\n` +
-          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
-          `Return ONLY the array, wrapped between <JSON> and </JSON>.`;
-
-        const rawResponse = await env.AI.run(model, {
-          input: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
-          max_tokens: 800,
-          temperature: 0
-        } as never);
-
-        const raw = (rawResponse as any)?.output?.[0]?.text
-          ?? (rawResponse as any)?.output_text
-          ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
-
-        let arraySource: string | null = null;
-        if (typeof raw === 'string') {
-          const tag = raw.match(/<JSON>([\s\S]*?)<\/JSON>/);
-          if (tag?.[1]) {
-            arraySource = tag[1].trim();
-          } else {
-            arraySource = extractFirstJsonArray(raw);
-          }
-        }
-
-        if (arraySource) {
-          const parsed = JSON.parse(arraySource);
-          if (Array.isArray(parsed)) {
-            for (const r of parsed) {
-              plan.push({ id: crypto.randomUUID(), ...(r as object) } as CDNRule);
-            }
-            trace.push({ name: 'harmony_json_parse', input: { raw }, output: parsed });
-          }
-        }
-      } catch (e) {
-        console.warn('harmony json generation failed', e);
-      }
-
-      // Also produce a conversational assistant reply for the UI chat
-      let assistantText = '';
-      try {
-        const chatResp = await env.AI.run(model, {
-          input: `SYSTEM:\nYou are a helpful CDN assistant. Reply conversationally about the configuration changes. Do not include code blocks or JSON.\n\nUSER:\n${prompt}`,
-          max_tokens: 300,
-          temperature: 0.2
-        } as never);
-        assistantText = (chatResp as any)?.output?.[0]?.text
-          ?? (chatResp as any)?.output_text
-          ?? (typeof chatResp === 'string' ? chatResp : '');
-        if (typeof assistantText === 'string') assistantText = assistantText.trim();
-      } catch (e) {
-        console.warn('harmony chat generation failed', e);
-      }
-
-      return Response.json({
-        config: plan,
-        trace,
-        todos,
-        notes,
-        assistant: assistantText || '',
-        validation: { success: true, errors: [] },
-        prompt,
-        message: 'Configuration generated successfully (harmony)'
-      });
-    }
-
-    // Non-harmony models can use tools via ai-sdk
     const cdnTools = createCDNTools(plan, trace, undefined, notes);
     const workersai = createWorkersAI({ binding: env.AI });
     const modelFn = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(model);
@@ -476,15 +357,7 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
     let completion: any;
     try {
       completion = await generateText({
-        system: `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-You are a helpful CDN optimization assistant. You can have a normal conversation and, when appropriate, call tools to build a concrete CDN plan.
-
-Guidance:
-- If the user greets you or asks general questions, reply conversationally.
-- If the user intent is actionable (e.g., caching, headers, routes, access, performance), call the relevant tools to construct rules.
-- Ask for any missing parameters (path, ttl, header name/value, route from/to) before calling tools.
-- Keep tool use focused (≤ 8 calls). After tools finish, provide a short summary of what changed.
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>`,
+        system: `You are a helpful CDN optimization assistant. You can have a normal conversation and, when appropriate, call tools to build a concrete CDN plan.\n\nGuidance:\n- If the user greets you or asks general questions, reply conversationally (do not call tools).\n- If the user intent is actionable (e.g., caching, headers, routes, access, performance), call the relevant tools to construct rules.\n- Ask for any missing parameters (path, ttl, header name/value, route from/to) before calling tools.\n- Keep tool use focused (≤ 8 calls). After tools finish, provide a short summary of what changed.\n- Do not use addResearchNote for greetings; only add notes that support selected optimizations.`,
         model: modelFn,
         tools: cdnTools,
         messages: [{ role: 'user', content: prompt }],
@@ -510,14 +383,24 @@ Guidance:
           `Wrap the JSON array between <JSON> and </JSON> tags and output nothing else.`;
 
         const rawResponse = await env.AI.run(model, {
-          input: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
+          prompt: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
           max_tokens: 800,
           temperature: 0.2
         } as never);
 
-        const raw = (rawResponse as any)?.output?.[0]?.text
+        let raw = (rawResponse as any)?.output?.[0]?.text
           ?? (rawResponse as any)?.output_text
           ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
+
+        // Try to unescape if the model returned a stringified array (with escaped newlines/quotes)
+        const tryUnescape = (s: string): string => {
+          const t = s.trim();
+          if (/^"[\s\S]*"$/.test(t)) {
+            try { return JSON.parse(t) as string; } catch { return s; }
+          }
+          return s;
+        };
+        if (typeof raw === 'string') raw = tryUnescape(raw);
 
         let arraySource: string | null = null;
         if (typeof raw === 'string') {
@@ -527,6 +410,15 @@ Guidance:
           } else {
             const bracket = raw.match(/\[[\s\S]*\]/);
             if (bracket && bracket[0]) arraySource = bracket[0];
+            else {
+              // Last resort: remove escaping and try again
+              const un = raw
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\r/g, '\r');
+              const br2 = un.match(/\[[\s\S]*\]/);
+              if (br2 && br2[0]) arraySource = br2[0];
+            }
           }
         }
 
@@ -537,7 +429,7 @@ Guidance:
               const withId = { id: crypto.randomUUID(), ...(r as object) } as CDNRule;
               plan.push(withId);
             }
-            trace.push({ name: 'fallback_json_parse', input: { raw }, output: parsed });
+            trace.push({ id: crypto.randomUUID(), label: 'fallback_json_parse', status: 'success', input: { raw }, output: parsed, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
           }
         }
       } catch (e) {
