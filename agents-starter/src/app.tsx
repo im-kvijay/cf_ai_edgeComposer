@@ -1,9 +1,22 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's alright */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // Component imports
 import { Button } from "@/components/button/Button";
 import { Textarea } from "@/components/textarea/Textarea";
+import { Loader } from "@/components/loader/Loader";
+import { ChecklistPanel } from "@/components/checklist/ChecklistPanel";
+import { RuleDetailsPanel } from "@/components/rules/RuleDetailsPanel";
+import { PlaybooksPanel } from "@/components/playbooks/PlaybooksPanel";
+import type {
+  ChecklistState,
+  PlaybookState,
+  ChecklistItem,
+  CDNRule,
+  TodoEntry,
+  ResearchNote,
+  ChecklistRunState
+} from "@/shared-types";
 
 // Icon imports
 import {
@@ -28,6 +41,11 @@ interface CDNPlan {
     description?: string;
   }>;
 }
+
+type ChatMessage =
+  | { role: 'user'; text: string }
+  | { role: 'assistant'; text: string }
+  | { role: 'tool'; text: string };
 
 interface PreviewMetrics {
   version: string;
@@ -63,6 +81,29 @@ export default function CDNConfigurator() {
     missCount: 23,
     p95Latency: 89
   });
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [todos, setTodos] = useState<TodoEntry[]>([]);
+  const [notes, setNotes] = useState<ResearchNote[]>([]);
+  const [checklist, setChecklist] = useState<ChecklistState | null>(null);
+  const [checklistStatus, setChecklistStatus] = useState<ChecklistRunState>("idle");
+  const [activeRuleIndex, setActiveRuleIndex] = useState<number | null>(null);
+  const [playbookState, setPlaybookState] = useState<PlaybookState | null>(null);
+
+  // Hydrate current rules from backend (if persisted)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/current');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.config)) {
+            setCurrentPlan({ rules: data.config });
+          }
+        }
+      } catch {}
+    })();
+  }, []);
 
   useEffect(() => {
     if (theme === "dark") {
@@ -88,40 +129,170 @@ export default function CDNConfigurator() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || isGenerating) return;
 
-    // Simulate AI response for demo
-    setProposedPlan({
-      rules: [
-        {
-          type: "cache",
-          path: "/api/*",
-          ttl: 300,
-          description: "Cache API responses for 5 minutes"
-        },
-        {
-          type: "header",
-          action: "add",
-          name: "X-CDN-Optimized",
-          value: "true",
-          description: "Add optimization header"
-        }
-      ]
-    });
-
-    setInput("");
-  };
-
-  const applyChanges = () => {
-    if (proposedPlan) {
-      setCurrentPlan(proposedPlan);
-      setProposedPlan(null);
+    try {
+      setIsGenerating(true);
+      // Add user chat
+      setMessages(prev => [...prev, { role: 'user', text: input }]);
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: input })
+      });
+      if (!res.ok) {
+        console.error('Generate failed', res.status);
+        setMessages(prev => [...prev, { role: 'assistant', text: `There was an error generating a plan (HTTP ${res.status}). Please try a more specific request.` }]);
+        return;
+      }
+      const data = await res.json();
+      const rules = Array.isArray(data?.config) ? enrichRulesWithIds(data.config) : [];
+      setProposedPlan({ rules });
+      // Assistant summary (if provided)
+      if (data?.assistant) {
+        setMessages(prev => [...prev, { role: 'assistant', text: data.assistant }]);
+      }
+      // Tool call trace
+      if (Array.isArray(data?.trace)) {
+        const toolMsgs: ChatMessage[] = data.trace.map((t: any) => ({
+          role: 'tool',
+          text: `${t.name}(${JSON.stringify(t.input)}) -> ${JSON.stringify(t.output)}`
+        }));
+        if (toolMsgs.length) setMessages(prev => [...prev, ...toolMsgs]);
+      }
+      if (Array.isArray(data?.todos)) setTodos(data.todos);
+      if (Array.isArray(data?.notes)) setNotes(data.notes);
+      if (data?.checklist) setChecklist(data.checklist as ChecklistState);
+      if (data?.playbook) setPlaybookState(data.playbook as PlaybookState);
+    } catch (err) {
+      console.error('Generate error', err);
+      setMessages(prev => [...prev, { role: 'assistant', text: 'I hit an error generating the plan. Please try again.' }]);
+    } finally {
+      setInput("");
+      setIsGenerating(false);
     }
   };
+
+  const mergeRules = (a: CDNPlan["rules"], b: CDNPlan["rules"]) => {
+    const seen = new Set<string>();
+    const serialize = (r: any) => JSON.stringify(r);
+    const out: any[] = [];
+    for (const r of [...a, ...b]) {
+      const key = serialize(r);
+      if (!seen.has(key)) { seen.add(key); out.push(r); }
+    }
+    return out as CDNPlan["rules"];
+  };
+
+  const enrichRulesWithIds = (rules: CDNPlan["rules"]) => {
+    return rules.map((rule) => {
+      if ((rule as any)?.id) return rule;
+      return { ...rule };
+    }) as CDNPlan["rules"];
+  };
+
+  const applyChanges = async () => {
+    if (!proposedPlan) return;
+    const merged = mergeRules(currentPlan.rules, proposedPlan.rules);
+    setCurrentPlan({ rules: merged });
+    setProposedPlan(null);
+    // Persist to backend (KV if bound; memory otherwise)
+    try {
+      await fetch('/api/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: merged })
+      });
+    } catch {}
+  };
+
+  const exportRules = async () => {
+    try {
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: proposedPlan?.rules ?? currentPlan.rules, filename: 'cdn-config.json' })
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cdn-config.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('export failed', e);
+    }
+  };
+
+  const ChatView = () => (
+    <div className="p-4 border-t border-neutral-200 dark:border-neutral-800">
+      <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">Conversation</div>
+      <div className="space-y-2 max-h-56 overflow-auto text-sm">
+        {messages.length === 0 ? (
+          <div className="text-neutral-500">No messages yet.</div>
+        ) : (
+          messages.map((m, i) => {
+            const label = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'Tool';
+            return (
+              <div key={i} className={`rounded p-2 ${m.role === 'user' ? 'bg-blue-50 dark:bg-blue-900/20' : m.role === 'tool' ? 'bg-neutral-100 dark:bg-neutral-900/60' : 'bg-green-50 dark:bg-green-900/20'}`}>
+                <div className="text-xs uppercase tracking-wide text-neutral-500 mb-1">{label}</div>
+                <div className="whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-200">
+                  {m.role === 'tool' ? (
+                    // Simplify tool readout
+                    <code className="text-xs">{m.text.replace(/\s+/g, ' ')}</code>
+                  ) : (
+                    m.text
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+      {(todos.length > 0 || notes.length > 0) && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {todos.length > 0 && (
+            <div>
+              <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">Todo</div>
+              <ul className="space-y-1 text-sm">
+                {todos.map(t => (
+                  <li key={t.id} className="flex items-center justify-between bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded">
+                    <span className={`mr-2 ${t.status === 'done' ? 'line-through opacity-70' : ''}`}>{t.text}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'done' ? 'bg-green-600 text-white' : 'bg-yellow-600 text-white'}`}>{t.status}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {notes.length > 0 && (
+            <div>
+              <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">Research</div>
+              <ul className="space-y-1 text-sm">
+                {notes.map(n => (
+                  <li key={n.id} className="bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded">
+                    {n.note}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   const revertChanges = () => {
     setProposedPlan(null);
   };
+
+  const currentRule = useMemo(() => {
+    if (activeRuleIndex === null) return null;
+    return currentPlan.rules[activeRuleIndex] ?? null;
+  }, [activeRuleIndex, currentPlan.rules]);
 
   return (
     <div className="h-screen w-full flex bg-neutral-50 dark:bg-neutral-900">
@@ -156,6 +327,18 @@ export default function CDNConfigurator() {
             </div>
           </div>
         </div>
+        <ChatView />
+        <ChecklistPanel
+          state={checklist}
+          onToggleItem={async (itemId) => {
+            setChecklist((prev) => updateChecklistState(prev, itemId));
+            await persistChecklistToggle(itemId);
+          }}
+          onRefresh={async () => {
+            const next = await fetchChecklist();
+            setChecklist(next);
+          }}
+        />
 
         {/* Chat Input */}
         <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
@@ -167,16 +350,20 @@ export default function CDNConfigurator() {
                   className="min-h-[80px] resize-none border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900"
                   value={input}
                   onChange={handleInputChange}
+                  disabled={isGenerating}
                 />
               </div>
               <Button
                 type="submit"
                 size="lg"
-                className="px-6"
-                disabled={!input.trim()}
+                className={`px-6 ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={!input.trim() || isGenerating}
               >
-                <Play size={18} className="mr-2" />
-                Generate
+                {isGenerating ? (
+                  <span className="flex items-center gap-2"><Loader /> Generating…</span>
+                ) : (
+                  <span className="flex items-center gap-2"><Play size={18} /> Generate</span>
+                )}
               </Button>
             </div>
             <div className="flex items-center justify-between text-sm text-neutral-600 dark:text-neutral-400">
@@ -188,14 +375,24 @@ export default function CDNConfigurator() {
                       size="sm"
                       onClick={applyChanges}
                       className="text-green-600 border-green-600 hover:bg-green-50 dark:hover:bg-green-900/20"
+                      disabled={isGenerating}
                     >
                       <CheckCircle size={16} className="mr-1" />
                       Apply
                     </Button>
                     <Button
                       size="sm"
+                      onClick={exportRules}
+                      className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                      disabled={isGenerating}
+                    >
+                      Export
+                    </Button>
+                    <Button
+                      size="sm"
                       onClick={revertChanges}
                       className="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
+                      disabled={isGenerating}
                     >
                       <ArrowClockwise size={16} className="mr-1" />
                       Revert
@@ -291,96 +488,40 @@ export default function CDNConfigurator() {
         </div>
       </div>
 
-      {/* Right Pane - Preview */}
-      <div className="w-96 bg-white dark:bg-neutral-950 flex flex-col">
-        {/* Preview Header */}
-        <div className="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800">
-          <div className="flex items-center gap-2">
-            <Eye size={18} className="text-neutral-600 dark:text-neutral-400" />
-            <span className="font-medium text-neutral-900 dark:text-neutral-100">Live Preview</span>
-          </div>
-        </div>
-
-        {/* Preview Iframe */}
-        <div className="flex-1 relative">
-          <iframe
-            src="https://httpbin.org/html"
-            className="w-full h-full border-0"
-            title="Preview"
-          />
-
-          {/* HUD Overlay */}
-          <div className="absolute top-4 right-4 bg-black/80 backdrop-blur-sm rounded-lg p-3 text-white text-xs font-mono space-y-2 min-w-[200px]">
-            <div className="flex items-center justify-between">
-              <span className="text-neutral-300">Version:</span>
-              <span className="text-blue-400">{previewMetrics.version}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-neutral-300">Route:</span>
-              <span className={`px-2 py-1 rounded text-xs ${
-                previewMetrics.route === 'v1'
-                  ? 'bg-green-600 text-white'
-                  : 'bg-orange-600 text-white'
-              }`}>
-                {previewMetrics.route.toUpperCase()}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-neutral-300">Cache:</span>
-              <span className={`px-2 py-1 rounded text-xs ${
-                previewMetrics.cacheStatus === 'HIT'
-                  ? 'bg-green-600 text-white'
-                  : 'bg-red-600 text-white'
-              }`}>
-                {previewMetrics.cacheStatus}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-neutral-300">Hits/Misses:</span>
-              <span className="text-green-400">{previewMetrics.hitCount}</span>
-              <span className="text-red-400">/{previewMetrics.missCount}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-neutral-300">P95 Latency:</span>
-              <span className="text-yellow-400">{previewMetrics.p95Latency}ms</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Preview Controls */}
-        <div className="p-4 border-t border-neutral-200 dark:border-neutral-800">
-          <div className="space-y-3">
-            <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">
-              Preview Controls
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                size="sm"
-                onClick={() => setPreviewMetrics(prev => ({
-                  ...prev,
-                  route: prev.route === 'v1' ? 'v2' : 'v1'
-                }))}
-              >
-                Switch Route
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => setPreviewMetrics(prev => ({
-                  ...prev,
-                  cacheStatus: prev.cacheStatus === 'HIT' ? 'MISS' : 'HIT'
-                }))}
-              >
-                Toggle Cache
-              </Button>
-            </div>
-            <div className="flex items-center justify-between text-xs text-neutral-600 dark:text-neutral-400">
-              <span>Simulating real CDN behavior</span>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>Live</span>
-              </div>
-            </div>
-          </div>
+      {/* Right Pane - Current Rules */}
+      <div className="w-96 bg-white dark:bg-neutral-950 flex flex-col border-l border-neutral-200 dark:border-neutral-800">
+        <RuleDetailsPanel
+          rule={currentRule ?? null}
+          onSelectRule={setActiveRuleIndex}
+          rules={currentPlan.rules}
+          onResetRule={async (ruleIndex) => {
+            const updated = await resetRule(ruleIndex);
+            setCurrentPlan((prev) => ({ rules: updated }));
+          }}
+          onUpdateRule={async (ruleIndex, patch) => {
+            const updated = await updateRule(ruleIndex, patch);
+            setCurrentPlan((prev) => ({ rules: updated }));
+          }}
+          onRemoveRule={async (ruleIndex) => {
+            const updated = await removeRule(ruleIndex);
+            setCurrentPlan((prev) => ({ rules: updated }));
+          }}
+        />
+        <PlaybooksPanel
+          state={playbookState}
+          onRunPlaybook={async (playbookId) => {
+            const result = await runPlaybook(playbookId);
+            setPlaybookState(result);
+          }}
+          onAdvanceStep={async () => {
+            const next = await advancePlaybookStep();
+            setPlaybookState(next);
+          }}
+        />
+        <div className="p-4 border-t border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400">
+          <div>Version: {previewMetrics.version}</div>
+          <div>Route: {previewMetrics.route.toUpperCase()} • Cache: {previewMetrics.cacheStatus}</div>
+          <div>Hits/Misses: {previewMetrics.hitCount}/{previewMetrics.missCount} • P95: {previewMetrics.p95Latency}ms</div>
         </div>
       </div>
     </div>

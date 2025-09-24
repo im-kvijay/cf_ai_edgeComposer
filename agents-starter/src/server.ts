@@ -11,11 +11,13 @@ import {
   createUIMessageStream,
   convertToModelMessages,
   createUIMessageStreamResponse,
-  type ToolSet
+  type ToolSet,
+  generateText
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { processToolCalls, cleanupMessages } from "./utils";
 import { tools, executions } from "./tools";
+import { createCDNTools, type CDNRule, type ToolTraceEntry, type TodoEntry, type ResearchNote } from "./cdn-tools";
 // import { env } from "cloudflare:workers";
 
 // const model = openai("gpt-4o-2024-11-20"); // OpenAI provider (disabled)
@@ -125,9 +127,14 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
   }
 }
 
+// In-memory fallback for storing the applied plan (dev-only; ephemeral in production)
+let CURRENT_PLAN: CDNRule[] = [];
+
 interface Env {
   Chat: DurableObjectNamespace<Chat>;
   AI: Ai;
+  // Optional KV for persisting plans (will fall back to in-memory if not bound)
+  CONFIG_KV?: KVNamespace;
 }
 
 /**
@@ -147,7 +154,7 @@ export default {
 
     if (url.pathname === "/ai-test") {
       try {
-        const modelParam = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+        const modelParam = "@cf/openai/gpt-oss-120b";
         const body = { prompt: "Say hello from Workers AI" } as const;
         const runPromise = env.AI.run(modelParam as keyof AiModels, body as never);
 
@@ -189,26 +196,45 @@ export default {
       return handleAPI(request, env);
     }
 
-    // Handle preview routes (mock for deployment)
+    // Handle preview routes (lightweight live HUD)
     if (url.pathname.startsWith('/preview/')) {
+      const route = url.searchParams.get('route') || 'v1';
+      const cache = url.searchParams.get('cache') || 'HIT';
+      const hits = url.searchParams.get('hits') || '0';
+      const miss = url.searchParams.get('miss') || '0';
+      const p95 = url.searchParams.get('p95') || '90';
+
       return new Response(`
         <html>
-          <head><title>CDN Preview</title></head>
-          <body style="font-family: system-ui, sans-serif; padding: 20px;">
-            <h1>CDN Configuration Preview</h1>
-            <p>This is a preview of how the CDN configuration would be applied.</p>
-            <p><strong>Path:</strong> ${url.pathname}</p>
-            <div style="background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 4px;">
-              <strong>Preview Mode Active</strong><br>
-              Route: v1<br>
-              Cache Status: HIT<br>
-              Response Time: ~85ms
+          <head>
+            <title>CDN Preview</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <style>
+              body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; }
+              .hud { position: fixed; top: 12px; right: 12px; background: rgba(0,0,0,0.8); color:#fff; padding:12px; border-radius:10px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 200px; }
+              .row { display:flex; justify-content: space-between; gap:12px; margin: 4px 0; }
+              .pill { padding:2px 6px; border-radius: 999px; font-weight:600; }
+              .ok { background:#16a34a; }
+              .warn { background:#ea580c; }
+              .err { background:#dc2626; }
+              .wrap { padding: 32px; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>Preview Surface</h1>
+              <p>This page stands in for your origin during preview. Use the HUD to observe values.</p>
+              <p><small>Route a real origin later and proxy this Worker in front.</small></p>
+            </div>
+            <div class="hud">
+              <div class="row"><span>Route:</span><span class="pill ${route === 'v1' ? 'ok' : 'warn'}">${route.toUpperCase()}</span></div>
+              <div class="row"><span>Cache:</span><span class="pill ${cache === 'HIT' ? 'ok' : 'err'}">${cache}</span></div>
+              <div class="row"><span>Hits/Misses:</span><span>${hits} / ${miss}</span></div>
+              <div class="row"><span>P95:</span><span>${p95}ms</span></div>
             </div>
           </body>
         </html>
-      `, {
-        headers: { 'Content-Type': 'text/html' }
-      });
+      `, { headers: { 'Content-Type': 'text/html' } });
     }
 
     // Handle Durable Object routes (mock for deployment)
@@ -246,6 +272,15 @@ async function handleAPI(request: Request, env: Env): Promise<Response> {
 
     case '/api/simulate':
       return simulateConfig(await request.json());
+
+    case '/api/export':
+      return exportConfig(await request.json());
+
+    case '/api/save':
+      return saveConfig(await request.json(), env);
+
+    case '/api/current':
+      return getCurrent(env);
 
     default:
       return new Response('API endpoint not found', { status: 404 });
@@ -305,28 +340,98 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       return new Response('Workers AI not configured', { status: 500 });
     }
 
-    // For demo, return a mock response
-    const mockConfig = [
-      {
-        type: "cache",
-        path: "/api/*",
-        ttl: 300,
-        description: "Cache API responses for 5 minutes"
-      },
-      {
-        type: "header",
-        action: "add",
-        name: "X-CDN-Optimized",
-        value: "true",
-        description: "Add optimization header"
-      }
-    ];
+    // Prompt the Workers AI model to generate ONLY a JSON array of rules
+    const system = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
+      `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
+      `- cache: path (string), ttl (number), description (string)\n` +
+      `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
+      `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
+      `- access: allow (string[]), deny (string[]), description (string?)\n` +
+      `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
+      `Return a compact JSON array. Do not include any explanation or markdown.`;
 
+    // Tool calling approach: let the model call structured tools to build a plan.
+    // Use generateText (non-streaming) so tool calls are fully executed before returning.
+    const plan: CDNRule[] = [];
+    const trace: ToolTraceEntry[] = [];
+    const todos: TodoEntry[] = [];
+    const notes: ResearchNote[] = [];
+    const cdnTools = createCDNTools(plan, trace, todos, notes);
+
+    const model = "@cf/openai/gpt-oss-120b" as keyof AiModels;
+    const workersai = createWorkersAI({ binding: env.AI });
+    const modelFn = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(model);
+
+    let completion: any;
+    try {
+      completion = await generateText({
+        system: `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+You are a helpful CDN optimization assistant. You can have a normal conversation and, when appropriate, call tools to build a concrete CDN plan.
+
+Guidance:
+- If the user greets you or asks general questions, reply conversationally.
+- If the user intent is actionable (e.g., caching, headers, routes, access, performance), call the relevant tools to construct rules.
+- Ask for any missing parameters (path, ttl, header name/value, route from/to) before calling tools.
+- Keep tool use focused (≤ 8 calls). After tools finish, provide a short summary of what changed.
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>`,
+        model: modelFn,
+        tools: cdnTools,
+        messages: [{ role: 'user', content: prompt }],
+        maxToolRoundtrips: 8,
+        maxTokens: 800,
+        temperature: 0.2
+      } as any);
+    } catch (e) {
+      console.warn('tool-generation failed, falling back to JSON mode', e);
+    }
+
+    // If tool plan is empty, fall back to JSON-output mode and parse
+    if (plan.length === 0) {
+      try {
+        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
+          `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
+          `- cache: path (string), ttl (number), description (string)\n` +
+          `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
+          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
+          `- access: allow (string[]), deny (string[]), description (string?)\n` +
+          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
+          `Return a compact JSON array. Do not include any explanation or markdown.`;
+
+        const rawResponse = await env.AI.run(model, {
+          input: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
+          max_tokens: 800,
+          temperature: 0.2
+        } as never);
+
+        const raw = (rawResponse as any)?.output?.[0]?.text
+          ?? (rawResponse as any)?.output_text
+          ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
+        const match = typeof raw === 'string' ? raw.match(/\[[\s\S]*\]/) : null;
+        if (match) {
+          const parsed = JSON.parse(match[0]);
+          if (Array.isArray(parsed)) {
+            for (const r of parsed) {
+              const withId = { id: crypto.randomUUID(), ...(r as object) } as CDNRule;
+              plan.push(withId);
+            }
+            trace.push({ name: 'fallback_json_parse', input: { raw }, output: parsed });
+          }
+        }
+      } catch (e) {
+        console.warn('json fallback failed', e);
+      }
+    }
+
+    // The executed tools or fallback have appended rules into 'plan'.
     return Response.json({
-      config: mockConfig,
+      config: plan,
+      trace,
+      todos,
+      notes,
+      assistant: (completion as any)?.text ?? '',
       validation: { success: true, errors: [] },
-      prompt: prompt,
-      message: 'Configuration generated successfully'
+      prompt,
+      message: 'Configuration generated successfully (tools)'
     });
 
   } catch (error) {
@@ -372,4 +477,43 @@ function simulateConfig(simData: { config?: any; requestCount?: number }): Respo
     metrics,
     summary: `Simulation completed for ${requestCount} requests`
   });
+}
+
+/**
+ * Export a configuration as downloadable JSON
+ */
+function exportConfig(data: { config?: unknown; filename?: string }): Response {
+  const config = data?.config ?? [];
+  const filename = (data?.filename || 'cdn-config.json').replace(/[^a-zA-Z0-9._-]/g, '_');
+  return new Response(JSON.stringify(config, null, 2), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename=${filename}`
+    }
+  });
+}
+
+/**
+ * Save applied configuration to KV (if bound) or memory
+ */
+async function saveConfig(data: { config?: CDNRule[] }, env: Env): Promise<Response> {
+  const cfg = Array.isArray(data?.config) ? data!.config! : [];
+  if (env.CONFIG_KV) {
+    await env.CONFIG_KV.put('current_plan', JSON.stringify(cfg));
+  } else {
+    CURRENT_PLAN = cfg;
+  }
+  return Response.json({ saved: true, count: cfg.length });
+}
+
+/**
+ * Retrieve current configuration
+ */
+async function getCurrent(env: Env): Promise<Response> {
+  if (env.CONFIG_KV) {
+    const txt = await env.CONFIG_KV.get('current_plan');
+    const cfg = txt ? (JSON.parse(txt) as CDNRule[]) : [];
+    return Response.json({ config: cfg });
+  }
+  return Response.json({ config: CURRENT_PLAN });
 }
