@@ -99,7 +99,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof allTools
           >,
-          stopWhen: stepCountIs(16)
+          stopWhen: stepCountIs(20)
         });
 
         writer.merge(result.toUIMessageStream());
@@ -350,20 +350,48 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
 
     // Use Workers AI model with tool-calling via ai-sdk
     const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as keyof AiModels;
-    const cdnTools = createCDNTools(plan, trace, undefined, notes);
+    // Build the CDN-specific tool suite; each tool mutates the shared plan/trace/todo/note arrays.
+    const cdnTools = createCDNTools(plan, trace, todos, notes);
+
+    // Utility wrapper so we record tool failures instead of throwing and losing context.
+    const runTool = async <TArg, TResult>(
+      label: string,
+      toolRef: { execute?: (args?: TArg) => Promise<TResult> } | undefined,
+      args?: TArg
+    ): Promise<TResult | null> => {
+      if (!toolRef?.execute) return null;
+      try {
+        return await toolRef.execute(args);
+      } catch (error) {
+        trace.push({
+          id: crypto.randomUUID(),
+          label: `${label} (auto)` ,
+          status: "error",
+          input: args,
+          output: { error: error instanceof Error ? error.message : String(error) },
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          errorMessage: error instanceof Error ? error.message : String(error)
+        });
+        return null;
+      }
+    };
     const workersai = createWorkersAI({ binding: env.AI });
     const modelFn = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(model);
 
+    // Primary LLM pass: gather requirements, run tools, and produce a draft assistant reply.
     let completion: any;
     try {
       completion = await generateText({
-        system: `You are a helpful CDN optimization assistant. You can have a normal conversation and, when appropriate, call tools to build a concrete CDN plan.\n\nGuidance:\n- If the user greets you or asks general questions, reply conversationally (do not call tools).\n- If the user intent is actionable (e.g., caching, headers, routes, access, performance), call the relevant tools to construct rules.\n- Ask for any missing parameters (path, ttl, header name/value, route from/to) before calling tools.\n- Keep tool use focused (≤ 8 calls). After tools finish, provide a short summary of what changed.\n- Do not use addResearchNote for greetings; only add notes that support selected optimizations.`,
+        system: `You are an AI edge configuration specialist. Hold a natural conversation and call tools to build, analyse, and polish a CDN plan.\n\nGuidance:\n- Confirm intent and missing parameters before invoking tools.\n- Use the rich toolset: cache/header/route/access/performance/image/rate-limit/bot/security, plus advanced rules (canary, banner, origin-shield, transform) and utilities (summarizePlan, scorePlanRisk, addTodoItem, validatePlan, dedupeRules).\n- Keep tool runs purposeful (≤ 8 round-trips). Compose multiple tools per turn when assembling complex plans (e.g., canary + guardrail + banner).\n- Never describe or suggest raw tool JSON; execute the tool call instead.\n- Summarize the impact after tool execution and surface any warnings from validation/risk scoring.\n- Only add research notes or todo items when they help humans review the plan.\n- Stay within approved actions: no external proxy origins in v1, canary percentage ≤ 50%, and prefer guardrails for risky changes.`,
         model: modelFn,
         tools: cdnTools,
+        toolChoice: 'auto',
         messages: [{ role: 'user', content: prompt }],
-        maxToolRoundtrips: 8,
+        maxToolRoundtrips: 24,
         maxTokens: 800,
-        temperature: 0.2
+        temperature: 0.2,
+        stopWhen: stepCountIs(20)
       } as any);
     } catch (e) {
       console.warn('tool-generation failed, falling back to JSON mode', e);
@@ -372,13 +400,24 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
     // If tool plan is empty, fall back to JSON-output mode and parse
     if (plan.length === 0) {
       try {
-        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rules. Each rule is an object with keys: \n` +
-          `type (one of: "cache" | "header" | "route" | "access" | "performance"), and optional fields depending on type:\n` +
-          `- cache: path (string), ttl (number), description (string)\n` +
-          `- header: action ("add"|"remove"|"modify"), name (string), value (string?), description (string?)\n` +
-          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description (string?)\n` +
-          `- access: allow (string[]), deny (string[]), description (string?)\n` +
-          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description (string?)\n` +
+        // Fallback generation: ask for raw JSON and repair the output into our rule schema.
+        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rule objects. Each object must include a \"type\" field with values from: \n` +
+          `"cache", "header", "route", "access", "performance", "image", "rate-limit", "bot-protection", "geo-routing", "security", "canary", "banner", "origin-shield", "transform".\n` +
+          `Fields per type:\n` +
+          `- cache: path (string glob), ttl (number, seconds), description?\n` +
+          `- header: action ("add"|"remove"|"modify"), name (string), value?, description?\n` +
+          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description?\n` +
+          `- access: allow (string[]), deny (string[]), description?\n` +
+          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description?\n` +
+          `- image: path (string), quality? (1-100), format? ("auto"|"webp"|"avif"|"jpeg"), width?, height?, description?\n` +
+          `- rate-limit: path (string), requestsPerMinute (number), burst?, action ("block"|"challenge"|"delay"|"log"), description?\n` +
+          `- bot-protection: mode ("off"|"js-challenge"|"managed-challenge"|"block"), sensitivity?, description?\n` +
+          `- geo-routing: from (string), toEU?, toUS?, toAPAC?, fallback?, description?\n` +
+          `- security: csp?, hstsMaxAge?, xfo?, referrerPolicy?, permissionsPolicy?, description?\n` +
+          `- canary: path (string), primaryOrigin (string), canaryOrigin (string), percentage (0-0.5), stickyBy? ("cookie"|"header"|"ip"|"session"), metricGuardrail? ({ metric: "latency"|"error_rate"|"cache_hit", operator: "lt"|"gt"|"lte"|"gte", threshold: number }), description?\n` +
+          `- banner: path (string), message (string), style? ({ tone?: string, theme?: string }), schedule? ({ start?: string, end?: string, timezone?: string }), audience? ({ segment?: string, geo?: string[] }), description?\n` +
+          `- origin-shield: origins (string[]), tieredCaching? ("smart"|"regional"|"off"), healthcheck? ({ path: string, intervalSeconds?: number, timeoutMs?: number }), description?\n` +
+          `- transform: path (string), phase ("request"|"response"), action ({ kind: "header"|"html-inject"|"rewrite-url", ... }), description?\n` +
           `Return a compact JSON array. Do not include any explanation or markdown.\n` +
           `Wrap the JSON array between <JSON> and </JSON> tags and output nothing else.`;
 
@@ -423,7 +462,45 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
         }
 
         if (arraySource) {
-          const parsed = JSON.parse(arraySource);
+          // Unwrap quoted array if needed (e.g., "\n[ ... ]")
+          let src = arraySource.trim();
+          if (/^"[\s\S]*"$/.test(src)) {
+            try { src = JSON.parse(src) as string; } catch {}
+          }
+
+          // Normalize common quasi-JSON patterns from models
+          const normalizeToJson = (s: string): string => {
+            let t = s.trim();
+            // Remove leading JSON escape sequences like \n, \t
+            t = t.replace(/^(\\[nrt])+/, "");
+            // If fenced, strip code fences
+            t = t.replace(/^```[\w-]*\n([\s\S]*?)\n```$/m, "$1");
+            // Replace single-quoted strings with double quotes
+            t = t.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+            // Quote unquoted object keys
+            t = t.replace(/([\{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g, '$1"$2"$3');
+            // Remove trailing commas
+            t = t.replace(/,(\s*[\]\}])/g, '$1');
+            // Collapse any stray JSON escapes
+            t = t.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
+            return t;
+          };
+
+          let jsonText = normalizeToJson(src);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(jsonText);
+          } catch {
+            // As a last resort, try re-extracting the first bracketed array after normalization
+            const br = jsonText.match(/\[[\s\S]*\]/);
+            if (br && br[0]) {
+              try {
+                parsed = JSON.parse(br[0]);
+              } catch {
+                parsed = undefined;
+              }
+            }
+          }
           if (Array.isArray(parsed)) {
             for (const r of parsed) {
               const withId = { id: crypto.randomUUID(), ...(r as object) } as CDNRule;
@@ -437,14 +514,107 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       }
     }
 
+    let summaryResult: { summary: string } | null = null;
+    let validationResult: { valid: boolean; errors: string[]; warnings: string[] } | null = null;
+    let riskResult: { score: number; classification: string; reasons: string[] } | null = null;
+    let riskAuditText: string | null = null;
+
+    if (plan.length > 0) {
+      // Deterministic post-processing ensures the UI receives structured diagnostics every time.
+      await runTool('dedupeRules', cdnTools.dedupeRules, {} as any);
+      validationResult = await runTool('validatePlan', cdnTools.validatePlan, {} as any);
+      summaryResult = await runTool('summarizePlan', cdnTools.summarizePlan, undefined as any);
+      riskResult = await runTool('scorePlanRisk', cdnTools.scorePlanRisk, {} as any);
+
+      const todoTexts = new Set(todos.map((t) => t.text.toLowerCase()));
+      const ensureTodo = async (text: string) => {
+        const key = text.toLowerCase();
+        if (todoTexts.has(key)) return;
+        await runTool('addTodoItem', cdnTools.addTodoItem, { text, status: 'pending' } as any);
+        todoTexts.add(key);
+      };
+
+      if (validationResult) {
+        for (const err of validationResult.errors ?? []) {
+          await ensureTodo(`Fix validation error: ${err}`);
+        }
+        for (const warn of validationResult.warnings ?? []) {
+          await ensureTodo(`Review warning: ${warn}`);
+        }
+      }
+
+      if (riskResult && riskResult.score >= 60) {
+        await ensureTodo(`Review plan risk (${riskResult.classification}, score ${riskResult.score}).`);
+      }
+      try {
+        // Secondary LLM call: produce a narrative risk audit, separate from the deterministic score.
+        const auditPrompt = `You are reviewing a proposed CDN configuration. Analyze risk from 0 (trivial) to 100 (catastrophic). Consider canary percentages, missing guardrails, rewrites, origin shielding, permissive access, runtime transforms, banners without end dates, and total change volume. Respond with a short heading, then a line \"Score: <number>\", followed by 3-5 bullet-style sentences explaining the risk.\n\nRules:\n${JSON.stringify(plan, null, 2)}`;
+        const auditResponse = await generateText({
+          system: 'You are a senior edge reliability engineer performing a production readiness review.',
+          model: modelFn,
+          messages: [{ role: 'user', content: auditPrompt }],
+          maxTokens: 400,
+          temperature: 0
+        } as any);
+        if (typeof auditResponse?.text === 'string') {
+          riskAuditText = auditResponse.text.trim();
+        }
+      } catch (auditError) {
+        console.warn('risk audit failed', auditError);
+      }
+    }
+
+    const validationPayload = validationResult ?? {
+      valid: plan.length > 0,
+      errors: [] as string[],
+      warnings: [] as string[]
+    };
+
+    const assistantInsights: string[] = [];
+    if (summaryResult?.summary) assistantInsights.push(summaryResult.summary.trim());
+    if (validationPayload.warnings.length) {
+      assistantInsights.push(`Warnings: ${validationPayload.warnings.join(' | ')}`);
+    }
+    if (validationPayload.errors.length) {
+      assistantInsights.push(`Errors: ${validationPayload.errors.join(' | ')}`);
+    }
+    if (riskResult) {
+      assistantInsights.push(`Risk level: ${riskResult.classification} (score ${riskResult.score}).`);
+      if (Array.isArray(riskResult.reasons) && riskResult.reasons.length) {
+        assistantInsights.push(`Risk drivers: ${riskResult.reasons.join('; ')}`);
+      }
+    }
+
+    const completionText = typeof (completion as any)?.text === 'string' ? (completion as any).text.trim() : '';
+    let assistantMessage = completionText;
+    const insightsSummary = assistantInsights.join('\n');
+    if (insightsSummary) {
+      if (!assistantMessage || /function call should look like/i.test(assistantMessage)) {
+        assistantMessage = insightsSummary;
+      } else {
+        assistantMessage = `${assistantMessage}\n\n${insightsSummary}`;
+      }
+    }
+    if (!assistantMessage && plan.length > 0) {
+      assistantMessage = `Generated ${plan.length} rule${plan.length === 1 ? '' : 's'}.`;
+    }
+
+    const insights = {
+      summary: summaryResult?.summary ?? null,
+      validation: validationPayload,
+      risk: riskResult,
+      riskAudit: riskAuditText
+    };
+
     // The executed tools or fallback have appended rules into 'plan'.
     return Response.json({
       config: plan,
       trace,
       todos,
       notes,
-      assistant: (completion as any)?.text ?? '',
-      validation: { success: true, errors: [] },
+      assistant: assistantMessage,
+      insights,
+      validation: validationPayload,
       prompt,
       message: 'Configuration generated successfully (tools)'
     });

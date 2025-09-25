@@ -19,3 +19,15 @@ correct errors and complete a code audit as you hook up portions of vibeSDK. inf
 implement gptoss in place of llama 3.3. ive attatched the openAI harmony prompt system for you.
 
 revert. add a framework (names and basic info) for more tools that could aid the usefulness of the project
+
+make tool calls in the UI look friendlier, hide the full json call from the user.
+
+remove the checklist section from the UI for now. resolve attached error.
+
+make general improvements and build upon what i have so far. inform me of everything you change, and the reasons why.
+
+add a dropdown from the risks box i made showing the LLM reasoning for the risk score
+
+suggest more rules to be added, and why you think they should.
+
+check if listRules is empty. llm got no output from calling it. audit the entire code and check errors. add comments to the code to explain what the important or ambigious pieces do. use proper grammar and formatting. no emojis anywhere.

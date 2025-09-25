@@ -8,7 +8,11 @@ export type RuleType =
   | "rate-limit"
   | "bot-protection"
   | "geo-routing"
-  | "security";
+  | "security"
+  | "canary"
+  | "banner"
+  | "origin-shield"
+  | "transform";
 
 export interface CacheRule {
   id: string;
@@ -103,6 +107,80 @@ export interface SecurityRule {
   description?: string;
 }
 
+export interface CanaryRule {
+  id: string;
+  type: "canary";
+  path: string;
+  primaryOrigin: string;
+  canaryOrigin: string;
+  percentage: number; // 0-0.5 typical cap
+  stickyBy?: "cookie" | "header" | "ip" | "session";
+  metricGuardrail?: {
+    metric: "latency" | "error_rate" | "cache_hit";
+    operator: "lt" | "gt" | "lte" | "gte";
+    threshold: number;
+  };
+  description?: string;
+}
+
+export interface BannerRule {
+  id: string;
+  type: "banner";
+  path: string;
+  message: string;
+  style?: {
+    tone?: "info" | "success" | "warning" | "danger" | "mint";
+    theme?: "light" | "dark" | "auto";
+  };
+  schedule?: {
+    start?: string; // ISO timestamp
+    end?: string;   // ISO timestamp
+    timezone?: string;
+  };
+  audience?: {
+    segment?: "logged-in" | "guest" | "beta" | "maintenance";
+    geo?: string[];
+  };
+  description?: string;
+}
+
+export interface OriginShieldRule {
+  id: string;
+  type: "origin-shield";
+  origins: string[]; // ordered preference
+  tieredCaching?: "smart" | "regional" | "off";
+  healthcheck?: {
+    path: string;
+    intervalSeconds?: number;
+    timeoutMs?: number;
+  };
+  description?: string;
+}
+
+export interface TransformRule {
+  id: string;
+  type: "transform";
+  path: string;
+  phase: "request" | "response";
+  action:
+    | {
+        kind: "header";
+        operation: "set" | "remove" | "append";
+        header: string;
+        value?: string;
+      }
+    | {
+        kind: "html-inject";
+        position: "head-start" | "head-end" | "body-start" | "body-end";
+        markup: string;
+      }
+    | {
+        kind: "rewrite-url";
+        to: string;
+      };
+  description?: string;
+}
+
 export type CDNRule =
   | CacheRule
   | HeaderRule
@@ -113,7 +191,11 @@ export type CDNRule =
   | RateLimitRule
   | BotProtectionRule
   | GeoRoutingRule
-  | SecurityRule;
+  | SecurityRule
+  | CanaryRule
+  | BannerRule
+  | OriginShieldRule
+  | TransformRule;
 
 export interface ToolTraceEntry {
   id: string;
