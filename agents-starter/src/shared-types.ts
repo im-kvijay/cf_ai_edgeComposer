@@ -51,7 +51,11 @@ export interface AccessRule {
 export interface PerformanceRule {
   id: string;
   type: "performance";
-  optimization: "compression" | "minification" | "image-optimization" | "lazy-loading";
+  optimization:
+    | "compression"
+    | "minification"
+    | "image-optimization"
+    | "lazy-loading";
   enabled: boolean;
   description?: string;
 }
@@ -134,7 +138,7 @@ export interface BannerRule {
   };
   schedule?: {
     start?: string; // ISO timestamp
-    end?: string;   // ISO timestamp
+    end?: string; // ISO timestamp
     timezone?: string;
   };
   audience?: {
@@ -197,6 +201,29 @@ export type CDNRule =
   | OriginShieldRule
   | TransformRule;
 
+export interface EdgePlan {
+  id: string;
+  rules: CDNRule[];
+  createdAt: string;
+  summary?: string;
+  description?: string;
+}
+
+export interface EdgePlanVersion {
+  id: string;
+  plan: EdgePlan;
+  promotedAt?: string;
+  promotedBy?: string;
+  description?: string;
+}
+
+export interface PreviewTokenState {
+  token: string;
+  versionId: string;
+  createdAt: string;
+  expiresAt?: string;
+}
+
 export interface ToolTraceEntry {
   id: string;
   label: string;
@@ -252,9 +279,19 @@ export interface ResearchNote {
   note: string;
 }
 
-export type PlaybookScenario = "ecommerce" | "blog" | "api" | "static" | "custom";
+export type PlaybookScenario =
+  | "ecommerce"
+  | "blog"
+  | "api"
+  | "static"
+  | "custom";
 
-export type PlaybookStepStatus = "pending" | "running" | "completed" | "blocked" | "error";
+export type PlaybookStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "blocked"
+  | "error";
 
 export interface PlaybookStep {
   id: string;

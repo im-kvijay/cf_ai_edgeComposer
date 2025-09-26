@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod/v3";
 import type {
   CDNRule,
+  CacheRule,
   ResearchNote,
   ToolTraceEntry,
   ImageRule,
@@ -32,7 +33,8 @@ const bannerScheduleSchema = z
   })
   .refine(
     ({ start, end }) => {
-      if (start && end) return new Date(start).getTime() <= new Date(end).getTime();
+      if (start && end)
+        return new Date(start).getTime() <= new Date(end).getTime();
       return true;
     },
     { message: "schedule start must be before end" }
@@ -95,7 +97,12 @@ const baseRuleSchemas = {
   performance: z.object({
     id: ID_SCHEMA,
     type: z.literal("performance"),
-    optimization: z.enum(["compression", "minification", "image-optimization", "lazy-loading"]),
+    optimization: z.enum([
+      "compression",
+      "minification",
+      "image-optimization",
+      "lazy-loading"
+    ]),
     enabled: z.boolean(),
     description: z.string().optional()
   }),
@@ -163,7 +170,9 @@ const baseRuleSchemas = {
     message: z.string().min(1),
     style: z
       .object({
-        tone: z.enum(["info", "success", "warning", "danger", "mint"]).optional(),
+        tone: z
+          .enum(["info", "success", "warning", "danger", "mint"])
+          .optional(),
         theme: z.enum(["light", "dark", "auto"]).optional()
       })
       .optional(),
@@ -207,12 +216,18 @@ const INPUT_SCHEMAS = {
   performance: baseRuleSchemas.performance.omit({ id: true, type: true }),
   image: baseRuleSchemas.image.omit({ id: true, type: true }),
   "rate-limit": baseRuleSchemas["rate-limit"].omit({ id: true, type: true }),
-  "bot-protection": baseRuleSchemas["bot-protection"].omit({ id: true, type: true }),
+  "bot-protection": baseRuleSchemas["bot-protection"].omit({
+    id: true,
+    type: true
+  }),
   "geo-routing": baseRuleSchemas["geo-routing"].omit({ id: true, type: true }),
   security: baseRuleSchemas.security.omit({ id: true, type: true }),
   canary: baseRuleSchemas.canary.omit({ id: true, type: true }),
   banner: baseRuleSchemas.banner.omit({ id: true, type: true }),
-  "origin-shield": baseRuleSchemas["origin-shield"].omit({ id: true, type: true }),
+  "origin-shield": baseRuleSchemas["origin-shield"].omit({
+    id: true,
+    type: true
+  }),
   transform: baseRuleSchemas.transform.omit({ id: true, type: true })
 } as const;
 
@@ -223,7 +238,12 @@ export function createCDNTools(
   notes?: ResearchNote[]
 ) {
   // Record tool invocations in the trace so the UI can display inputs/outputs and failures.
-  const record = (label: string, input: unknown, output: unknown, status: ToolTraceEntry["status"] = "success") => {
+  const record = (
+    label: string,
+    input: unknown,
+    output: unknown,
+    status: ToolTraceEntry["status"] = "success"
+  ) => {
     try {
       trace?.push({
         id: crypto.randomUUID(),
@@ -239,8 +259,7 @@ export function createCDNTools(
 
   // Generate a stable signature used when deduping rules (ignores the random rule id).
   const canonicalizeRule = (rule: CDNRule) => {
-    const base = { ...rule } as any;
-    delete base.id;
+    const { id: _id, ...rest } = rule;
 
     switch (rule.type) {
       case "cache":
@@ -360,14 +379,20 @@ export function createCDNTools(
           action: rule.action
         });
       default:
-        return JSON.stringify(base);
+        return JSON.stringify(rest);
     }
   };
   const addCacheRule = tool({
     description: "Add a cache rule (provide path glob and TTL in seconds)",
     inputSchema: INPUT_SCHEMAS.cache,
     execute: async ({ path, ttl, description }) => {
-      const rule: CDNRule = { id: crypto.randomUUID(), type: "cache", path, ttl, description };
+      const rule: CDNRule = {
+        id: crypto.randomUUID(),
+        type: "cache",
+        path,
+        ttl,
+        description
+      };
       plan.push(rule);
       record("addCacheRule", { path, ttl, description }, rule);
       return rule;
@@ -378,7 +403,14 @@ export function createCDNTools(
     description: "Add a header rule (add/remove/modify)",
     inputSchema: INPUT_SCHEMAS.header,
     execute: async ({ action, name, value, description }) => {
-      const rule: CDNRule = { id: crypto.randomUUID(), type: "header", action, name, value, description };
+      const rule: CDNRule = {
+        id: crypto.randomUUID(),
+        type: "header",
+        action,
+        name,
+        value,
+        description
+      };
       plan.push(rule);
       record("addHeaderRule", { action, name, value, description }, rule);
       return rule;
@@ -389,7 +421,14 @@ export function createCDNTools(
     description: "Add a routing rule (redirect/rewrite/proxy)",
     inputSchema: INPUT_SCHEMAS.route,
     execute: async ({ from, to, ruleType, description }) => {
-      const rule: CDNRule = { id: crypto.randomUUID(), type: "route", from, to, ruleType, description };
+      const rule: CDNRule = {
+        id: crypto.randomUUID(),
+        type: "route",
+        from,
+        to,
+        ruleType,
+        description
+      };
       plan.push(rule);
       record("addRouteRule", { from, to, ruleType, description }, rule);
       return rule;
@@ -400,7 +439,13 @@ export function createCDNTools(
     description: "Add an access control rule (allow/deny lists)",
     inputSchema: INPUT_SCHEMAS.access,
     execute: async ({ allow, deny, description }) => {
-      const rule: CDNRule = { id: crypto.randomUUID(), type: "access", allow, deny, description };
+      const rule: CDNRule = {
+        id: crypto.randomUUID(),
+        type: "access",
+        allow,
+        deny,
+        description
+      };
       plan.push(rule);
       record("addAccessRule", { allow, deny, description }, rule);
       return rule;
@@ -411,9 +456,19 @@ export function createCDNTools(
     description: "Add a performance optimization rule",
     inputSchema: INPUT_SCHEMAS.performance,
     execute: async ({ optimization, enabled, description }) => {
-      const rule: CDNRule = { id: crypto.randomUUID(), type: "performance", optimization, enabled, description };
+      const rule: CDNRule = {
+        id: crypto.randomUUID(),
+        type: "performance",
+        optimization,
+        enabled,
+        description
+      };
       plan.push(rule);
-      record("addPerformanceRule", { optimization, enabled, description }, rule);
+      record(
+        "addPerformanceRule",
+        { optimization, enabled, description },
+        rule
+      );
       return rule;
     }
   });
@@ -434,7 +489,11 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addImageRule", { path, quality, format, width, height, description }, rule);
+      record(
+        "addImageRule",
+        { path, quality, format, width, height, description },
+        rule
+      );
       return rule;
     }
   });
@@ -442,7 +501,13 @@ export function createCDNTools(
   const addRateLimitRule = tool({
     description: "Add a rate limit rule (rpm, burst, action)",
     inputSchema: INPUT_SCHEMAS["rate-limit"],
-    execute: async ({ path, requestsPerMinute, burst, action, description }) => {
+    execute: async ({
+      path,
+      requestsPerMinute,
+      burst,
+      action,
+      description
+    }) => {
       const rule: RateLimitRule = {
         id: crypto.randomUUID(),
         type: "rate-limit",
@@ -453,7 +518,11 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addRateLimitRule", { path, requestsPerMinute, burst, action, description }, rule);
+      record(
+        "addRateLimitRule",
+        { path, requestsPerMinute, burst, action, description },
+        rule
+      );
       return rule;
     }
   });
@@ -490,7 +559,11 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addGeoRoutingRule", { from, toEU, toUS, toAPAC, fallback, description }, rule);
+      record(
+        "addGeoRoutingRule",
+        { from, toEU, toUS, toAPAC, fallback, description },
+        rule
+      );
       return rule;
     }
   });
@@ -498,7 +571,14 @@ export function createCDNTools(
   const addSecurityRule = tool({
     description: "Add security headers (CSP/HSTS/XFO/etc)",
     inputSchema: INPUT_SCHEMAS.security,
-    execute: async ({ csp, hstsMaxAge, xfo, referrerPolicy, permissionsPolicy, description }) => {
+    execute: async ({
+      csp,
+      hstsMaxAge,
+      xfo,
+      referrerPolicy,
+      permissionsPolicy,
+      description
+    }) => {
       const rule: SecurityRule = {
         id: crypto.randomUUID(),
         type: "security",
@@ -510,7 +590,18 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addSecurityRule", { csp, hstsMaxAge, xfo, referrerPolicy, permissionsPolicy, description }, rule);
+      record(
+        "addSecurityRule",
+        {
+          csp,
+          hstsMaxAge,
+          xfo,
+          referrerPolicy,
+          permissionsPolicy,
+          description
+        },
+        rule
+      );
       return rule;
     }
   });
@@ -518,7 +609,15 @@ export function createCDNTools(
   const addCanaryRule = tool({
     description: "Safely split traffic between primary and canary origins",
     inputSchema: INPUT_SCHEMAS.canary,
-    execute: async ({ path, primaryOrigin, canaryOrigin, percentage, stickyBy, metricGuardrail, description }) => {
+    execute: async ({
+      path,
+      primaryOrigin,
+      canaryOrigin,
+      percentage,
+      stickyBy,
+      metricGuardrail,
+      description
+    }) => {
       const rule: CanaryRule = {
         id: crypto.randomUUID(),
         type: "canary",
@@ -531,7 +630,19 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addCanaryRule", { path, primaryOrigin, canaryOrigin, percentage, stickyBy, metricGuardrail, description }, rule);
+      record(
+        "addCanaryRule",
+        {
+          path,
+          primaryOrigin,
+          canaryOrigin,
+          percentage,
+          stickyBy,
+          metricGuardrail,
+          description
+        },
+        rule
+      );
       return rule;
     }
   });
@@ -539,7 +650,14 @@ export function createCDNTools(
   const addBannerRule = tool({
     description: "Inject a lightweight HTML banner with targeting and schedule",
     inputSchema: INPUT_SCHEMAS.banner,
-    execute: async ({ path, message, style, schedule, audience, description }) => {
+    execute: async ({
+      path,
+      message,
+      style,
+      schedule,
+      audience,
+      description
+    }) => {
       const rule: BannerRule = {
         id: crypto.randomUUID(),
         type: "banner",
@@ -551,7 +669,11 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addBannerRule", { path, style, schedule, audience, description }, rule);
+      record(
+        "addBannerRule",
+        { path, style, schedule, audience, description },
+        rule
+      );
       return rule;
     }
   });
@@ -569,13 +691,18 @@ export function createCDNTools(
         description
       };
       plan.push(rule);
-      record("addOriginShieldRule", { origins, tieredCaching, healthcheck, description }, rule);
+      record(
+        "addOriginShieldRule",
+        { origins, tieredCaching, healthcheck, description },
+        rule
+      );
       return rule;
     }
   });
 
   const addTransformRule = tool({
-    description: "Add a request/response transform (headers, HTML injection, rewrite)",
+    description:
+      "Add a request/response transform (headers, HTML injection, rewrite)",
     inputSchema: INPUT_SCHEMAS.transform,
     execute: async ({ path, phase, action, description }) => {
       const rule: TransformRule = {
@@ -593,7 +720,8 @@ export function createCDNTools(
   });
 
   const addResearchNote = tool({
-    description: "Add a research note that supports the chosen optimizations (not for greetings)",
+    description:
+      "Add a research note that supports the chosen optimizations (not for greetings)",
     inputSchema: z.object({ note: z.string() }),
     execute: async ({ note }) => {
       const entry: ResearchNote = { id: crypto.randomUUID(), note };
@@ -621,7 +749,7 @@ export function createCDNTools(
       patch: z.record(z.any())
     }),
     execute: async ({ id, patch }) => {
-      const idx = plan.findIndex(r => r.id === id);
+      const idx = plan.findIndex((r) => r.id === id);
       if (idx === -1) {
         record("updateRule", { id, patch }, { error: "not_found" }, "error");
         return { error: "Rule not found" } as const;
@@ -638,7 +766,7 @@ export function createCDNTools(
     inputSchema: z.object({ id: z.string() }),
     execute: async ({ id }) => {
       const before = plan.length;
-      const remain = plan.filter(r => r.id !== id);
+      const remain = plan.filter((r) => r.id !== id);
       if (remain.length === before) {
         record("removeRule", { id }, { removed: 0 }, "error");
         return { removed: 0 } as const;
@@ -673,8 +801,15 @@ export function createCDNTools(
       const keep = Array.from(seen.values());
       while (plan.length) plan.pop();
       for (const r of keep) plan.push(r);
-      record("dedupeRules", {}, { removed: duplicates.length, prunedIds: duplicates.map((d) => d.id) });
-      return { removed: duplicates.length, prunedIds: duplicates.map((d) => d.id) } as const;
+      record(
+        "dedupeRules",
+        {},
+        { removed: duplicates.length, prunedIds: duplicates.map((d) => d.id) }
+      );
+      return {
+        removed: duplicates.length,
+        prunedIds: duplicates.map((d) => d.id)
+      } as const;
     }
   });
 
@@ -690,21 +825,33 @@ export function createCDNTools(
         if (!validator) continue;
         const parsed = validator.safeParse(rule);
         if (!parsed.success) {
-          const detail = parsed.error.issues.map((issue) => issue.message).join("; ");
+          const detail = parsed.error.issues
+            .map((issue) => issue.message)
+            .join("; ");
           errors.push(`${rule.type} (${rule.id}) invalid: ${detail}`);
           continue;
         }
 
         // Extra guardrails beyond schema basics
         if (rule.type === "cache" && rule.ttl > 604_800) {
-          warnings.push(`Cache rule ${rule.id} ttl>${604_800} seconds; ensure long TTL is intentional.`);
+          warnings.push(
+            `Cache rule ${rule.id} ttl>${604_800} seconds; ensure long TTL is intentional.`
+          );
         }
         if (rule.type === "canary") {
-          if (rule.percentage > 0.3) warnings.push(`Canary ${rule.id} exceeds 30%; confirm rollout strategy.`);
-          if (!rule.metricGuardrail) warnings.push(`Canary ${rule.id} lacks metric guardrail. Consider adding one.`);
+          if (rule.percentage > 0.3)
+            warnings.push(
+              `Canary ${rule.id} exceeds 30%; confirm rollout strategy.`
+            );
+          if (!rule.metricGuardrail)
+            warnings.push(
+              `Canary ${rule.id} lacks metric guardrail. Consider adding one.`
+            );
         }
         if (rule.type === "banner" && rule.schedule && !rule.schedule.end) {
-          warnings.push(`Banner ${rule.id} has no end date; confirm indefinite banner is desired.`);
+          warnings.push(
+            `Banner ${rule.id} has no end date; confirm indefinite banner is desired.`
+          );
         }
       }
 
@@ -715,15 +862,21 @@ export function createCDNTools(
   });
 
   const summarizePlan = tool({
-    description: "Generate a short natural-language summary of the current plan",
+    description:
+      "Generate a short natural-language summary of the current plan",
     inputSchema: z
       .object({
-        focus: z.array(z.enum(["cache", "routing", "security", "performance", "runtime"])).optional()
+        focus: z
+          .array(
+            z.enum(["cache", "routing", "security", "performance", "runtime"])
+          )
+          .optional()
       })
       .optional(),
     execute: async ({ focus } = {}) => {
       if (plan.length === 0) {
-        const summary = "No rules yet. Ask for a configuration to populate the plan.";
+        const summary =
+          "No rules yet. Ask for a configuration to populate the plan.";
         record("summarizePlan", { summary }, summary);
         return { summary } as const;
       }
@@ -744,33 +897,57 @@ export function createCDNTools(
       };
 
       if (byType.has("cache")) {
-        const rules = byType.get("cache")!;
-        const fastestTtl = Math.min(...rules.map((r) => (r as any).ttl ?? Infinity));
-        addLine("cache", `Caching ${rules.length} path${rules.length === 1 ? "" : "s"} with TTL floor ${fastestTtl}s.`);
+        const cacheRules = byType.get("cache") as CacheRule[] | undefined;
+        if (cacheRules && cacheRules.length > 0) {
+          const fastestTtl = Math.min(...cacheRules.map((rule) => rule.ttl));
+          addLine(
+            "cache",
+            `Caching ${cacheRules.length} path${cacheRules.length === 1 ? "" : "s"} with TTL floor ${fastestTtl}s.`
+          );
+        }
       }
       if (byType.has("route") || byType.has("canary")) {
         const routes = (byType.get("route") ?? []).length;
         const canaries = (byType.get("canary") ?? []).length;
-        if (routes) addLine("routing", `${routes} permanent route adjustment${routes === 1 ? "" : "s"}.`);
-        if (canaries) addLine("routing", `${canaries} canary split${canaries === 1 ? "" : "s"} with guardrails.`);
+        if (routes)
+          addLine(
+            "routing",
+            `${routes} permanent route adjustment${routes === 1 ? "" : "s"}.`
+          );
+        if (canaries)
+          addLine(
+            "routing",
+            `${canaries} canary split${canaries === 1 ? "" : "s"} with guardrails.`
+          );
       }
       if (byType.has("security") || byType.has("header")) {
         const headers = (byType.get("header") ?? []).length;
         const security = (byType.get("security") ?? []).length;
-        addLine("security", `Hardening headers (${headers} general, ${security} security bundles).`);
+        addLine(
+          "security",
+          `Hardening headers (${headers} general, ${security} security bundles).`
+        );
       }
       if (byType.has("performance") || byType.has("image")) {
         const perf = (byType.get("performance") ?? []).length;
         const image = (byType.get("image") ?? []).length;
-        addLine("performance", `${perf} performance toggles and ${image} image tune-up rule${image === 1 ? "" : "s"}.`);
+        addLine(
+          "performance",
+          `${perf} performance toggles and ${image} image tune-up rule${image === 1 ? "" : "s"}.`
+        );
       }
       if (byType.has("banner") || byType.has("transform")) {
         const banners = (byType.get("banner") ?? []).length;
         const transforms = (byType.get("transform") ?? []).length;
-        addLine("runtime", `${banners} banner${banners === 1 ? "" : "s"} + ${transforms} runtime transform${transforms === 1 ? "" : "s"}.`);
+        addLine(
+          "runtime",
+          `${banners} banner${banners === 1 ? "" : "s"} + ${transforms} runtime transform${transforms === 1 ? "" : "s"}.`
+        );
       }
 
-      const summary = lines.join(" ") || "Plan contains advanced rules; review details panel.";
+      const summary =
+        lines.join(" ") ||
+        "Plan contains advanced rules; review details panel.";
       record("summarizePlan", { focus }, summary);
       return { summary } as const;
     }
@@ -786,7 +963,7 @@ export function createCDNTools(
       const add = (delta: number, reason: string) => {
         if (delta === 0) return;
         score += delta;
-        reasons.push(`${reason} (+${delta.toFixed(1).replace(/\.0$/, '')})`);
+        reasons.push(`${reason} (+${delta.toFixed(1).replace(/\.0$/, "")})`);
       };
 
       const totalRules = plan.length;
@@ -805,11 +982,17 @@ export function createCDNTools(
             break;
           }
           case "banner": {
-            add(rule.schedule?.end ? 4 : 7, `Banner on ${rule.path}${rule.schedule?.end ? " (timed)" : " (no end)"}`);
+            add(
+              rule.schedule?.end ? 4 : 7,
+              `Banner on ${rule.path}${rule.schedule?.end ? " (timed)" : " (no end)"}`
+            );
             break;
           }
           case "origin-shield": {
-            add(6, `Origin shield for ${rule.origins.length} origin${rule.origins.length === 1 ? "" : "s"}`);
+            add(
+              6,
+              `Origin shield for ${rule.origins.length} origin${rule.origins.length === 1 ? "" : "s"}`
+            );
             break;
           }
           case "transform": {
@@ -817,7 +1000,7 @@ export function createCDNTools(
             break;
           }
           case "route": {
-            add(5, `Route ${rule.from} → ${rule.to}`);
+            add(5, `Route ${rule.from} -> ${rule.to}`);
             break;
           }
           case "security": {
@@ -829,8 +1012,14 @@ export function createCDNTools(
             break;
           }
           case "access": {
-            if ((rule.allow?.length ?? 0) === 0 && (rule.deny?.length ?? 0) === 0) {
-              add(2, `Permissive access rule on ${rule.description ?? rule.id}`);
+            if (
+              (rule.allow?.length ?? 0) === 0 &&
+              (rule.deny?.length ?? 0) === 0
+            ) {
+              add(
+                2,
+                `Permissive access rule on ${rule.description ?? rule.id}`
+              );
             }
             break;
           }
@@ -842,9 +1031,21 @@ export function createCDNTools(
       }
 
       score = Math.min(100, Math.round(score));
-      const classification = score <= 30 ? "low" : score <= 60 ? "moderate" : score <= 80 ? "elevated" : "high";
+      const classification =
+        score <= 30
+          ? "low"
+          : score <= 60
+            ? "moderate"
+            : score <= 80
+              ? "elevated"
+              : "high";
       const result = { score, classification, reasons } as const;
-      record("scorePlanRisk", {}, result, classification === "high" ? "error" : "success");
+      record(
+        "scorePlanRisk",
+        {},
+        result,
+        classification === "high" ? "error" : "success"
+      );
       return result;
     }
   });
@@ -890,9 +1091,28 @@ export function createCDNTools(
     inputSchema: z.object({}).optional(),
     execute: async () => {
       const rules: CDNRule[] = [
-        { id: crypto.randomUUID(), type: "cache", path: "/images/*", ttl: 86400, description: "Cache product images for 24h" },
-        { id: crypto.randomUUID(), type: "performance", optimization: "compression", enabled: true, description: "Enable gzip/brotli" },
-        { id: crypto.randomUUID(), type: "header", action: "add", name: "Cache-Control", value: "public, max-age=86400", description: "Cache header for static assets" }
+        {
+          id: crypto.randomUUID(),
+          type: "cache",
+          path: "/images/*",
+          ttl: 86400,
+          description: "Cache product images for 24h"
+        },
+        {
+          id: crypto.randomUUID(),
+          type: "performance",
+          optimization: "compression",
+          enabled: true,
+          description: "Enable gzip/brotli"
+        },
+        {
+          id: crypto.randomUUID(),
+          type: "header",
+          action: "add",
+          name: "Cache-Control",
+          value: "public, max-age=86400",
+          description: "Cache header for static assets"
+        }
       ];
       for (const r of rules) plan.push(r);
       record("addEcommercePreset", {}, rules);
@@ -905,7 +1125,16 @@ export function createCDNTools(
     inputSchema: z.object({ domain: z.string().optional() }),
     execute: async ({ domain }) => {
       const rules: CDNRule[] = [
-        { id: crypto.randomUUID(), type: "security", csp: "default-src 'self'", hstsMaxAge: 31536000, xfo: "DENY", referrerPolicy: "no-referrer", permissionsPolicy: "geolocation=()", description: "Strict security headers" }
+        {
+          id: crypto.randomUUID(),
+          type: "security",
+          csp: "default-src 'self'",
+          hstsMaxAge: 31536000,
+          xfo: "DENY",
+          referrerPolicy: "no-referrer",
+          permissionsPolicy: "geolocation=()",
+          description: "Strict security headers"
+        }
       ];
       for (const r of rules) plan.push(r);
       record("addSecurityPresetStrict", { domain }, rules);

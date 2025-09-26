@@ -9,19 +9,46 @@ interface PlaybooksPanelProps {
   isLoading?: boolean;
 }
 
-const PLAYBOOK_OPTIONS: Array<{ id: PlaybookState["scenario"]; label: string; description: string }> = [
-  { id: "ecommerce", label: "E-commerce", description: "Optimize product detail pages and cart experiences." },
-  { id: "blog", label: "Blog", description: "Improve caching and SEO for editorial sites." },
-  { id: "api", label: "API", description: "Harden headers and reduce latency for API endpoints." },
-  { id: "static", label: "Static", description: "Tune asset caching and edge rendering for static sites." }
+const PLAYBOOK_OPTIONS: Array<{
+  id: PlaybookState["scenario"];
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "ecommerce",
+    label: "E-commerce",
+    description: "Optimize product detail pages and cart experiences."
+  },
+  {
+    id: "blog",
+    label: "Blog",
+    description: "Improve caching and SEO for editorial sites."
+  },
+  {
+    id: "api",
+    label: "API",
+    description: "Harden headers and reduce latency for API endpoints."
+  },
+  {
+    id: "static",
+    label: "Static",
+    description: "Tune asset caching and edge rendering for static sites."
+  }
 ];
 
-export function PlaybooksPanel({ state, onRunPlaybook, onAdvanceStep, isLoading }: PlaybooksPanelProps) {
+export function PlaybooksPanel({
+  state,
+  onRunPlaybook,
+  onAdvanceStep,
+  isLoading
+}: PlaybooksPanelProps) {
   const activeScenario = state?.scenario;
   const summary = useMemo(() => {
     if (!state) return "Select a playbook to begin";
     const total = state.steps.length;
-    const completed = state.steps.filter((step) => step.status === "completed").length;
+    const completed = state.steps.filter(
+      (step) => step.status === "completed"
+    ).length;
     return `${completed}/${total} steps complete`;
   }, [state]);
 
@@ -29,10 +56,20 @@ export function PlaybooksPanel({ state, onRunPlaybook, onAdvanceStep, isLoading 
     <div className="border-t border-neutral-200 bg-neutral-50 px-4 py-3 text-sm dark:border-neutral-800 dark:bg-neutral-950">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <div className="font-medium text-neutral-900 dark:text-neutral-100">Playbooks</div>
-          <div className="text-xs text-neutral-500 dark:text-neutral-400">{summary}</div>
+          <div className="font-medium text-neutral-900 dark:text-neutral-100">
+            Playbooks
+          </div>
+          <div className="text-xs text-neutral-500 dark:text-neutral-400">
+            {summary}
+          </div>
         </div>
-        <Button size="sm" variant="outline" className="h-7" onClick={onAdvanceStep} disabled={isLoading || !state}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={onAdvanceStep}
+          disabled={isLoading || !state}
+        >
           Advance Step
         </Button>
       </div>
@@ -53,7 +90,9 @@ export function PlaybooksPanel({ state, onRunPlaybook, onAdvanceStep, isLoading 
               disabled={isLoading}
             >
               <div className="text-sm font-medium">{option.label}</div>
-              <div className="text-xs text-neutral-500 dark:text-neutral-400">{option.description}</div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                {option.description}
+              </div>
             </button>
           );
         })}
@@ -61,9 +100,13 @@ export function PlaybooksPanel({ state, onRunPlaybook, onAdvanceStep, isLoading 
 
       {state ? (
         <div className="mt-3 space-y-2 rounded border border-neutral-200 bg-white p-3 text-xs dark:border-neutral-800 dark:bg-neutral-900/60">
-          <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Current Step</div>
+          <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+            Current Step
+          </div>
           {state.steps.length === 0 ? (
-            <div className="text-neutral-500">No steps defined for this playbook.</div>
+            <div className="text-neutral-500">
+              No steps defined for this playbook.
+            </div>
           ) : (
             state.steps.map((step, index) => (
               <div
@@ -81,11 +124,17 @@ export function PlaybooksPanel({ state, onRunPlaybook, onAdvanceStep, isLoading 
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">{index + 1}. {step.title}</div>
-                  <div className="text-[10px] uppercase tracking-wide">{step.status}</div>
+                  <div className="text-sm font-medium">
+                    {index + 1}. {step.title}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wide">
+                    {step.status}
+                  </div>
                 </div>
                 {step.description ? (
-                  <div className="mt-1 text-xs opacity-80">{step.description}</div>
+                  <div className="mt-1 text-xs opacity-80">
+                    {step.description}
+                  </div>
                 ) : null}
               </div>
             ))

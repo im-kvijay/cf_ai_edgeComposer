@@ -31,3 +31,13 @@ add a dropdown from the risks box i made showing the LLM reasoning for the risk 
 suggest more rules to be added, and why you think they should.
 
 check if listRules is empty. llm got no output from calling it. audit the entire code and check errors. add comments to the code to explain what the important or ambigious pieces do. use proper grammar and formatting. no emojis anywhere.
+
+review whats left for the end goal of the project (attached)
+
+suggest plan of action.
+
+explain attatched error.
+
+list full state of project. check code and make sure everything is up to spec.
+
+work on adding new API features, I will be going through and fixing your work. do not modify existing APIs, if you find something to change, inform me before you do it. do not delete or remove large portions of the code without informing me.

@@ -18,7 +18,15 @@ import { createWorkersAI } from "workers-ai-provider";
 import { processToolCalls, cleanupMessages } from "./utils";
 import { tools, executions } from "./tools";
 import { createCDNTools } from "./cdn-tools";
-import type { CDNRule, ToolTraceEntry, TodoEntry, ResearchNote } from "@/shared-types";
+import type {
+  CDNRule,
+  ToolTraceEntry,
+  TodoEntry,
+  ResearchNote,
+  EdgePlan,
+  EdgePlanVersion
+} from "@/shared-types";
+import { ConfigDO } from "./config-do";
 // import { env } from "cloudflare:workers";
 
 // const model = openai("gpt-4o-2024-11-20"); // OpenAI provider (disabled)
@@ -32,7 +40,6 @@ import type { CDNRule, ToolTraceEntry, TodoEntry, ResearchNote } from "@/shared-
  * Chat Agent implementation that handles real-time AI chat interactions
  */
 export class Chat extends AIChatAgent<Env> {
-
   /**
    * Handles incoming chat messages and manages the response stream
    */
@@ -66,10 +73,16 @@ export class Chat extends AIChatAgent<Env> {
         }
         // Fallback to the last message's metadata if present
         if (!metaModel && this.messages.length > 0) {
-          metaModel = (this.messages[this.messages.length - 1] as any)?.metadata?.model as string | undefined;
+          metaModel = (this.messages[this.messages.length - 1] as any)?.metadata
+            ?.model as string | undefined;
         }
-        const modelId = metaModel || _options?.model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-        const model = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(modelId);
+        const modelId =
+          metaModel ||
+          _options?.model ||
+          "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+        const model = (
+          workersai as unknown as (m: string) => ReturnType<typeof workersai>
+        )(modelId);
 
         // Clean up incomplete tool calls to prevent API errors
         const cleanedMessages = cleanupMessages(this.messages);
@@ -136,6 +149,8 @@ interface Env {
   AI: Ai;
   // Optional KV for persisting plans (will fall back to in-memory if not bound)
   CONFIG_KV?: KVNamespace;
+  ConfigDO?: DurableObjectNamespace<ConfigDO>;
+  ORIGIN_URL?: string;
 }
 
 /**
@@ -157,11 +172,16 @@ export default {
       try {
         const modelParam = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
         const body = { prompt: "Say hello from Workers AI" } as const;
-        const runPromise = env.AI.run(modelParam as keyof AiModels, body as never);
+        const runPromise = env.AI.run(
+          modelParam as keyof AiModels,
+          body as never
+        );
 
         const timed = await Promise.race([
           runPromise,
-          new Promise((resolve) => setTimeout(() => resolve("__TIMEOUT__"), 15000))
+          new Promise((resolve) =>
+            setTimeout(() => resolve("__TIMEOUT__"), 15000)
+          )
         ] as const);
 
         if (timed === "__TIMEOUT__") {
@@ -193,19 +213,20 @@ export default {
     }
 
     // Handle API routes first
-    if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith("/api/")) {
       return handleAPI(request, env);
     }
 
     // Handle preview routes (lightweight live HUD)
-    if (url.pathname.startsWith('/preview/')) {
-      const route = url.searchParams.get('route') || 'v1';
-      const cache = url.searchParams.get('cache') || 'HIT';
-      const hits = url.searchParams.get('hits') || '0';
-      const miss = url.searchParams.get('miss') || '0';
-      const p95 = url.searchParams.get('p95') || '90';
+    if (url.pathname.startsWith("/preview/")) {
+      const route = url.searchParams.get("route") || "v1";
+      const cache = url.searchParams.get("cache") || "HIT";
+      const hits = url.searchParams.get("hits") || "0";
+      const miss = url.searchParams.get("miss") || "0";
+      const p95 = url.searchParams.get("p95") || "90";
 
-      return new Response(`
+      return new Response(
+        `
         <html>
           <head>
             <title>CDN Preview</title>
@@ -228,26 +249,30 @@ export default {
               <p><small>Route a real origin later and proxy this Worker in front.</small></p>
             </div>
             <div class="hud">
-              <div class="row"><span>Route:</span><span class="pill ${route === 'v1' ? 'ok' : 'warn'}">${route.toUpperCase()}</span></div>
-              <div class="row"><span>Cache:</span><span class="pill ${cache === 'HIT' ? 'ok' : 'err'}">${cache}</span></div>
+              <div class="row"><span>Route:</span><span class="pill ${route === "v1" ? "ok" : "warn"}">${route.toUpperCase()}</span></div>
+              <div class="row"><span>Cache:</span><span class="pill ${cache === "HIT" ? "ok" : "err"}">${cache}</span></div>
               <div class="row"><span>Hits/Misses:</span><span>${hits} / ${miss}</span></div>
               <div class="row"><span>P95:</span><span>${p95}ms</span></div>
             </div>
           </body>
         </html>
-      `, { headers: { 'Content-Type': 'text/html' } });
+      `,
+        { headers: { "Content-Type": "text/html" } }
+      );
     }
 
     // Handle Durable Object routes (mock for deployment)
-    if (url.pathname.startsWith('/do/')) {
+    if (url.pathname.startsWith("/do/")) {
       return Response.json({
         message: "Durable Object routes are not available in this deployment",
         status: "mock"
       });
     }
 
+    const runtimeResponse = await applyEdgeRuntime(request, env);
+    if (runtimeResponse) return runtimeResponse;
+
     return (
-      // Route the request to our agent or return 404 if not found
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
@@ -260,31 +285,92 @@ export default {
 async function handleAPI(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  const method = request.method.toUpperCase();
+
+  if (path.startsWith("/api/token/")) {
+    if (method === "DELETE") {
+      const token = path.split("/").pop() as string;
+      return forwardToConfigDO(env, `/token/${token}`, { method: "DELETE" });
+    }
+  }
+
+  if (path === "/api/active" && method === "GET") {
+    return forwardToConfigDO(env, "/active");
+  }
+
+  if (path === "/api/draft" && method === "GET") {
+    return forwardToConfigDO(env, "/draft");
+  }
+
+  if (path === "/api/versions" && method === "GET") {
+    return forwardToConfigDO(env, "/versions");
+  }
+
+  if (path.startsWith("/api/versions/") && method === "GET") {
+    const versionId = path.split("/")[3];
+    return forwardToConfigDO(env, `/versions/${versionId}`);
+  }
+
+  if (path === "/api/plan" && method === "POST") {
+    return forwardToConfigDO(env, "/plan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: await request.text()
+    });
+  }
+
+  if (path === "/api/promote" && method === "POST") {
+    return forwardToConfigDO(env, "/promote", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: await request.text()
+    });
+  }
+
+  if (path === "/api/rollback" && method === "POST") {
+    return forwardToConfigDO(env, "/rollback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: await request.text()
+    });
+  }
+
+  if (path === "/api/token" && method === "POST") {
+    return forwardToConfigDO(env, "/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: await request.text()
+    });
+  }
+
+  if (path === "/api/tokens" && method === "GET") {
+    return forwardToConfigDO(env, "/tokens");
+  }
 
   switch (path) {
-    case '/api/examples':
+    case "/api/examples":
       return getExamples();
 
-    case '/api/generate':
+    case "/api/generate":
       return generateConfig(request, env);
 
-    case '/api/validate':
+    case "/api/validate":
       return validateConfig(await request.json());
 
-    case '/api/simulate':
+    case "/api/simulate":
       return simulateConfig(await request.json());
 
-    case '/api/export':
+    case "/api/export":
       return exportConfig(await request.json());
 
-    case '/api/save':
+    case "/api/save":
       return saveConfig(await request.json(), env);
 
-    case '/api/current':
+    case "/api/current":
       return getCurrent(env);
 
     default:
-      return new Response('API endpoint not found', { status: 404 });
+      return new Response("API endpoint not found", { status: 404 });
   }
 }
 
@@ -320,7 +406,7 @@ function getExamples(): Response {
 
   return Response.json({
     examples,
-    message: 'Example CDN configurations for different use cases'
+    message: "Example CDN configurations for different use cases"
   });
 }
 
@@ -329,16 +415,19 @@ function getExamples(): Response {
  */
 async function generateConfig(request: Request, env: Env): Promise<Response> {
   try {
-    const body = await request.json() as { prompt?: string; scenario?: string };
-    const prompt = body.prompt || '';
+    const body = (await request.json()) as {
+      prompt?: string;
+      scenario?: string;
+    };
+    const prompt = body.prompt || "";
     // Scenario parameter available but not used in demo
 
     if (!prompt) {
-      return new Response('Prompt is required', { status: 400 });
+      return new Response("Prompt is required", { status: 400 });
     }
 
     if (!env.AI) {
-      return new Response('Workers AI not configured', { status: 500 });
+      return new Response("Workers AI not configured", { status: 500 });
     }
 
     // Guidance string used in fallback mode (built into the prompt below)
@@ -365,10 +454,12 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       } catch (error) {
         trace.push({
           id: crypto.randomUUID(),
-          label: `${label} (auto)` ,
+          label: `${label} (auto)`,
           status: "error",
           input: args,
-          output: { error: error instanceof Error ? error.message : String(error) },
+          output: {
+            error: error instanceof Error ? error.message : String(error)
+          },
           startedAt: new Date().toISOString(),
           finishedAt: new Date().toISOString(),
           errorMessage: error instanceof Error ? error.message : String(error)
@@ -377,31 +468,34 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       }
     };
     const workersai = createWorkersAI({ binding: env.AI });
-    const modelFn = (workersai as unknown as (m: string) => ReturnType<typeof workersai>)(model);
+    const modelFn = (
+      workersai as unknown as (m: string) => ReturnType<typeof workersai>
+    )(model);
 
     // Primary LLM pass: gather requirements, run tools, and produce a draft assistant reply.
     let completion: any;
     try {
       completion = await generateText({
-        system: `You are an AI edge configuration specialist. Hold a natural conversation and call tools to build, analyse, and polish a CDN plan.\n\nGuidance:\n- Confirm intent and missing parameters before invoking tools.\n- Use the rich toolset: cache/header/route/access/performance/image/rate-limit/bot/security, plus advanced rules (canary, banner, origin-shield, transform) and utilities (summarizePlan, scorePlanRisk, addTodoItem, validatePlan, dedupeRules).\n- Keep tool runs purposeful (≤ 8 round-trips). Compose multiple tools per turn when assembling complex plans (e.g., canary + guardrail + banner).\n- Never describe or suggest raw tool JSON; execute the tool call instead.\n- Summarize the impact after tool execution and surface any warnings from validation/risk scoring.\n- Only add research notes or todo items when they help humans review the plan.\n- Stay within approved actions: no external proxy origins in v1, canary percentage ≤ 50%, and prefer guardrails for risky changes.`,
+        system: `You are an AI edge configuration specialist. Hold a natural conversation and call tools to build, analyse, and polish a CDN plan.\n\nGuidance:\n- Confirm intent and missing parameters before invoking tools.\n- Use the rich toolset: cache/header/route/access/performance/image/rate-limit/bot/security, plus advanced rules (canary, banner, origin-shield, transform) and utilities (summarizePlan, scorePlanRisk, addTodoItem, validatePlan, dedupeRules).\n- Keep tool runs purposeful (<= 8 round-trips). Compose multiple tools per turn when assembling complex plans (e.g., canary + guardrail + banner).\n- Never describe or suggest raw tool JSON; execute the tool call instead.\n- Summarize the impact after tool execution and surface any warnings from validation/risk scoring.\n- Only add research notes or todo items when they help humans review the plan.\n- Stay within approved actions: no external proxy origins in v1, canary percentage <= 50%, and prefer guardrails for risky changes.`,
         model: modelFn,
         tools: cdnTools,
-        toolChoice: 'auto',
-        messages: [{ role: 'user', content: prompt }],
+        toolChoice: "auto",
+        messages: [{ role: "user", content: prompt }],
         maxToolRoundtrips: 24,
         maxTokens: 800,
         temperature: 0.2,
         stopWhen: stepCountIs(20)
       } as any);
     } catch (e) {
-      console.warn('tool-generation failed, falling back to JSON mode', e);
+      console.warn("tool-generation failed, falling back to JSON mode", e);
     }
 
     // If tool plan is empty, fall back to JSON-output mode and parse
     if (plan.length === 0) {
       try {
         // Fallback generation: ask for raw JSON and repair the output into our rule schema.
-        const jsonSystem = `You are a CDN configuration generator. Output ONLY a JSON array of rule objects. Each object must include a \"type\" field with values from: \n` +
+        const jsonSystem =
+          `You are a CDN configuration generator. Output ONLY a JSON array of rule objects. Each object must include a \"type\" field with values from: \n` +
           `"cache", "header", "route", "access", "performance", "image", "rate-limit", "bot-protection", "geo-routing", "security", "canary", "banner", "origin-shield", "transform".\n` +
           `Fields per type:\n` +
           `- cache: path (string glob), ttl (number, seconds), description?\n` +
@@ -427,22 +521,29 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
           temperature: 0.2
         } as never);
 
-        let raw = (rawResponse as any)?.output?.[0]?.text
-          ?? (rawResponse as any)?.output_text
-          ?? (typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse));
+        let raw =
+          (rawResponse as any)?.output?.[0]?.text ??
+          (rawResponse as any)?.output_text ??
+          (typeof rawResponse === "string"
+            ? rawResponse
+            : JSON.stringify(rawResponse));
 
         // Try to unescape if the model returned a stringified array (with escaped newlines/quotes)
         const tryUnescape = (s: string): string => {
           const t = s.trim();
           if (/^"[\s\S]*"$/.test(t)) {
-            try { return JSON.parse(t) as string; } catch { return s; }
+            try {
+              return JSON.parse(t) as string;
+            } catch {
+              return s;
+            }
           }
           return s;
         };
-        if (typeof raw === 'string') raw = tryUnescape(raw);
+        if (typeof raw === "string") raw = tryUnescape(raw);
 
         let arraySource: string | null = null;
-        if (typeof raw === 'string') {
+        if (typeof raw === "string") {
           const tag = raw.match(/<JSON>([\s\S]*?)<\/JSON>/);
           if (tag && tag[1]) {
             arraySource = tag[1].trim();
@@ -452,9 +553,9 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
             else {
               // Last resort: remove escaping and try again
               const un = raw
-                .replace(/\\n/g, '\n')
-                .replace(/\\t/g, '\t')
-                .replace(/\\r/g, '\r');
+                .replace(/\\n/g, "\n")
+                .replace(/\\t/g, "\t")
+                .replace(/\\r/g, "\r");
               const br2 = un.match(/\[[\s\S]*\]/);
               if (br2 && br2[0]) arraySource = br2[0];
             }
@@ -465,7 +566,9 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
           // Unwrap quoted array if needed (e.g., "\n[ ... ]")
           let src = arraySource.trim();
           if (/^"[\s\S]*"$/.test(src)) {
-            try { src = JSON.parse(src) as string; } catch {}
+            try {
+              src = JSON.parse(src) as string;
+            } catch {}
           }
 
           // Normalize common quasi-JSON patterns from models
@@ -480,9 +583,12 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
             // Quote unquoted object keys
             t = t.replace(/([\{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g, '$1"$2"$3');
             // Remove trailing commas
-            t = t.replace(/,(\s*[\]\}])/g, '$1');
+            t = t.replace(/,(\s*[\]\}])/g, "$1");
             // Collapse any stray JSON escapes
-            t = t.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
+            t = t
+              .replace(/\\n/g, "\n")
+              .replace(/\\t/g, "\t")
+              .replace(/\\r/g, "\r");
             return t;
           };
 
@@ -503,34 +609,68 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
           }
           if (Array.isArray(parsed)) {
             for (const r of parsed) {
-              const withId = { id: crypto.randomUUID(), ...(r as object) } as CDNRule;
+              const withId = {
+                id: crypto.randomUUID(),
+                ...(r as object)
+              } as CDNRule;
               plan.push(withId);
             }
-            trace.push({ id: crypto.randomUUID(), label: 'fallback_json_parse', status: 'success', input: { raw }, output: parsed, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+            trace.push({
+              id: crypto.randomUUID(),
+              label: "fallback_json_parse",
+              status: "success",
+              input: { raw },
+              output: parsed,
+              startedAt: new Date().toISOString(),
+              finishedAt: new Date().toISOString()
+            });
           }
         }
       } catch (e) {
-        console.warn('json fallback failed', e);
+        console.warn("json fallback failed", e);
       }
     }
 
     let summaryResult: { summary: string } | null = null;
-    let validationResult: { valid: boolean; errors: string[]; warnings: string[] } | null = null;
-    let riskResult: { score: number; classification: string; reasons: string[] } | null = null;
+    let validationResult: {
+      valid: boolean;
+      errors: string[];
+      warnings: string[];
+    } | null = null;
+    let riskResult: {
+      score: number;
+      classification: string;
+      reasons: string[];
+    } | null = null;
     let riskAuditText: string | null = null;
 
     if (plan.length > 0) {
       // Deterministic post-processing ensures the UI receives structured diagnostics every time.
-      await runTool('dedupeRules', cdnTools.dedupeRules, {} as any);
-      validationResult = await runTool('validatePlan', cdnTools.validatePlan, {} as any);
-      summaryResult = await runTool('summarizePlan', cdnTools.summarizePlan, undefined as any);
-      riskResult = await runTool('scorePlanRisk', cdnTools.scorePlanRisk, {} as any);
+      await runTool("dedupeRules", cdnTools.dedupeRules, {} as any);
+      validationResult = await runTool(
+        "validatePlan",
+        cdnTools.validatePlan,
+        {} as any
+      );
+      summaryResult = await runTool(
+        "summarizePlan",
+        cdnTools.summarizePlan,
+        undefined as any
+      );
+      riskResult = await runTool(
+        "scorePlanRisk",
+        cdnTools.scorePlanRisk,
+        {} as any
+      );
 
       const todoTexts = new Set(todos.map((t) => t.text.toLowerCase()));
       const ensureTodo = async (text: string) => {
         const key = text.toLowerCase();
         if (todoTexts.has(key)) return;
-        await runTool('addTodoItem', cdnTools.addTodoItem, { text, status: 'pending' } as any);
+        await runTool("addTodoItem", cdnTools.addTodoItem, {
+          text,
+          status: "pending"
+        } as any);
         todoTexts.add(key);
       };
 
@@ -544,23 +684,26 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       }
 
       if (riskResult && riskResult.score >= 60) {
-        await ensureTodo(`Review plan risk (${riskResult.classification}, score ${riskResult.score}).`);
+        await ensureTodo(
+          `Review plan risk (${riskResult.classification}, score ${riskResult.score}).`
+        );
       }
       try {
         // Secondary LLM call: produce a narrative risk audit, separate from the deterministic score.
         const auditPrompt = `You are reviewing a proposed CDN configuration. Analyze risk from 0 (trivial) to 100 (catastrophic). Consider canary percentages, missing guardrails, rewrites, origin shielding, permissive access, runtime transforms, banners without end dates, and total change volume. Respond with a short heading, then a line \"Score: <number>\", followed by 3-5 bullet-style sentences explaining the risk.\n\nRules:\n${JSON.stringify(plan, null, 2)}`;
         const auditResponse = await generateText({
-          system: 'You are a senior edge reliability engineer performing a production readiness review.',
+          system:
+            "You are a senior edge reliability engineer performing a production readiness review.",
           model: modelFn,
-          messages: [{ role: 'user', content: auditPrompt }],
+          messages: [{ role: "user", content: auditPrompt }],
           maxTokens: 400,
           temperature: 0
         } as any);
-        if (typeof auditResponse?.text === 'string') {
+        if (typeof auditResponse?.text === "string") {
           riskAuditText = auditResponse.text.trim();
         }
       } catch (auditError) {
-        console.warn('risk audit failed', auditError);
+        console.warn("risk audit failed", auditError);
       }
     }
 
@@ -571,33 +714,59 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
     };
 
     const assistantInsights: string[] = [];
-    if (summaryResult?.summary) assistantInsights.push(summaryResult.summary.trim());
+    if (summaryResult?.summary)
+      assistantInsights.push(summaryResult.summary.trim());
     if (validationPayload.warnings.length) {
-      assistantInsights.push(`Warnings: ${validationPayload.warnings.join(' | ')}`);
+      assistantInsights.push(
+        `Warnings: ${validationPayload.warnings.join(" | ")}`
+      );
     }
     if (validationPayload.errors.length) {
-      assistantInsights.push(`Errors: ${validationPayload.errors.join(' | ')}`);
+      assistantInsights.push(`Errors: ${validationPayload.errors.join(" | ")}`);
     }
     if (riskResult) {
-      assistantInsights.push(`Risk level: ${riskResult.classification} (score ${riskResult.score}).`);
+      assistantInsights.push(
+        `Risk level: ${riskResult.classification} (score ${riskResult.score}).`
+      );
       if (Array.isArray(riskResult.reasons) && riskResult.reasons.length) {
-        assistantInsights.push(`Risk drivers: ${riskResult.reasons.join('; ')}`);
+        assistantInsights.push(
+          `Risk drivers: ${riskResult.reasons.join("; ")}`
+        );
       }
     }
 
-    const completionText = typeof (completion as any)?.text === 'string' ? (completion as any).text.trim() : '';
+    const completionText =
+      typeof (completion as any)?.text === "string"
+        ? (completion as any).text.trim()
+        : "";
     let assistantMessage = completionText;
-    const insightsSummary = assistantInsights.join('\n');
+    const insightsSummary = assistantInsights.join("\n");
     if (insightsSummary) {
-      if (!assistantMessage || /function call should look like/i.test(assistantMessage)) {
+      if (
+        !assistantMessage ||
+        /function call should look like/i.test(assistantMessage)
+      ) {
         assistantMessage = insightsSummary;
       } else {
         assistantMessage = `${assistantMessage}\n\n${insightsSummary}`;
       }
     }
     if (!assistantMessage && plan.length > 0) {
-      assistantMessage = `Generated ${plan.length} rule${plan.length === 1 ? '' : 's'}.`;
+      assistantMessage = `Generated ${plan.length} rule${plan.length === 1 ? "" : "s"}.`;
     }
+
+    const planRecord: EdgePlan = {
+      id: crypto.randomUUID(),
+      rules: plan,
+      createdAt: new Date().toISOString(),
+      summary: summaryResult?.summary ?? undefined
+    };
+
+    const draftVersionId = await persistDraftPlan(
+      env,
+      planRecord,
+      summaryResult?.summary ?? undefined
+    );
 
     const insights = {
       summary: summaryResult?.summary ?? null,
@@ -615,13 +784,13 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       assistant: assistantMessage,
       insights,
       validation: validationPayload,
+      draftVersionId,
       prompt,
-      message: 'Configuration generated successfully (tools)'
+      message: "Configuration generated successfully (tools)"
     });
-
   } catch (error) {
-    console.error('Error generating config:', error);
-    return new Response('Internal server error', { status: 500 });
+    console.error("Error generating config:", error);
+    return new Response("Internal server error", { status: 500 });
   }
 }
 
@@ -636,16 +805,19 @@ function validateConfig(configData: { config?: any }): Response {
   return Response.json({
     validation: {
       success: isValid,
-      errors: isValid ? [] : ['Invalid configuration format']
+      errors: isValid ? [] : ["Invalid configuration format"]
     },
-    message: isValid ? 'Configuration is valid' : 'Configuration has errors'
+    message: isValid ? "Configuration is valid" : "Configuration has errors"
   });
 }
 
 /**
  * Simulate CDN configuration performance
  */
-function simulateConfig(simData: { config?: any; requestCount?: number }): Response {
+function simulateConfig(simData: {
+  config?: any;
+  requestCount?: number;
+}): Response {
   // Config parameter available but not used in demo
   const requestCount = simData.requestCount || 100;
 
@@ -669,11 +841,14 @@ function simulateConfig(simData: { config?: any; requestCount?: number }): Respo
  */
 function exportConfig(data: { config?: unknown; filename?: string }): Response {
   const config = data?.config ?? [];
-  const filename = (data?.filename || 'cdn-config.json').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const filename = (data?.filename || "cdn-config.json").replace(
+    /[^a-zA-Z0-9._-]/g,
+    "_"
+  );
   return new Response(JSON.stringify(config, null, 2), {
     headers: {
-      'Content-Type': 'application/json',
-      'Content-Disposition': `attachment; filename=${filename}`
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename=${filename}`
     }
   });
 }
@@ -681,10 +856,13 @@ function exportConfig(data: { config?: unknown; filename?: string }): Response {
 /**
  * Save applied configuration to KV (if bound) or memory
  */
-async function saveConfig(data: { config?: CDNRule[] }, env: Env): Promise<Response> {
+async function saveConfig(
+  data: { config?: CDNRule[] },
+  env: Env
+): Promise<Response> {
   const cfg = Array.isArray(data?.config) ? data!.config! : [];
   if (env.CONFIG_KV) {
-    await env.CONFIG_KV.put('current_plan', JSON.stringify(cfg));
+    await env.CONFIG_KV.put("current_plan", JSON.stringify(cfg));
   } else {
     CURRENT_PLAN = cfg;
   }
@@ -696,9 +874,294 @@ async function saveConfig(data: { config?: CDNRule[] }, env: Env): Promise<Respo
  */
 async function getCurrent(env: Env): Promise<Response> {
   if (env.CONFIG_KV) {
-    const txt = await env.CONFIG_KV.get('current_plan');
+    const txt = await env.CONFIG_KV.get("current_plan");
     const cfg = txt ? (JSON.parse(txt) as CDNRule[]) : [];
     return Response.json({ config: cfg });
   }
   return Response.json({ config: CURRENT_PLAN });
+}
+
+const CONFIG_DO_NAME = "edge-config";
+
+async function persistDraftPlan(
+  env: Env,
+  plan: EdgePlan,
+  description?: string
+): Promise<string | null> {
+  if (env.ConfigDO) {
+    const id = env.ConfigDO.idFromName(CONFIG_DO_NAME);
+    const stub = env.ConfigDO.get(id);
+    const res = await stub.fetch("https://config/plan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ plan, description })
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { draft?: EdgePlanVersion };
+      return data.draft?.id ?? null;
+    }
+    return null;
+  } else {
+    CURRENT_PLAN = plan.rules;
+    if (env.CONFIG_KV) {
+      await env.CONFIG_KV.put("current_plan", JSON.stringify(plan.rules));
+    }
+  }
+  return null;
+}
+
+async function fetchActivePlan(
+  env: Env
+): Promise<{ plan: EdgePlan; versionId?: string } | null> {
+  if (env.ConfigDO) {
+    const id = env.ConfigDO.idFromName(CONFIG_DO_NAME);
+    const stub = env.ConfigDO.get(id);
+    const res = await stub.fetch("https://config/active");
+    if (res.ok) {
+      const data = (await res.json()) as { active?: EdgePlanVersion | null };
+      if (data.active) {
+        return { plan: data.active.plan, versionId: data.active.id };
+      }
+    }
+  }
+
+  if (CURRENT_PLAN.length === 0) return null;
+  return {
+    plan: {
+      id: "in-memory",
+      rules: CURRENT_PLAN,
+      createdAt: new Date().toISOString()
+    }
+  };
+}
+
+async function forwardToConfigDO(
+  env: Env,
+  path: string,
+  init?: RequestInit & { body?: string }
+): Promise<Response> {
+  if (!env.ConfigDO) {
+    return Response.json(
+      { error: "config_durable_object_unavailable" },
+      { status: 503 }
+    );
+  }
+  const id = env.ConfigDO.idFromName(CONFIG_DO_NAME);
+  const stub = env.ConfigDO.get(id);
+  const requestInit = init ?? {};
+  const req = new Request(`https://config${path}`, requestInit);
+  return stub.fetch(req);
+}
+
+async function applyEdgeRuntime(
+  request: Request,
+  env: Env
+): Promise<Response | null> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return null;
+  }
+
+  const active = await fetchActivePlan(env);
+  if (!active || active.plan.rules.length === 0) {
+    return null;
+  }
+
+  const url = new URL(request.url);
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/preview/")
+  ) {
+    return null;
+  }
+
+  const matchedRules: CDNRule[] = [];
+  let targetUrl = new URL(request.url);
+  let redirectLocation: string | null = null;
+  let cacheTtl: number | undefined;
+  const headersToSet: Array<{ name: string; value: string }> = [];
+  const headersToRemove: string[] = [];
+  let bannerRule: CDNRule | null = null;
+  let selectedRouteLabel = "primary";
+
+  for (const rule of active.plan.rules) {
+    if (!matchesRulePath(rule, url.pathname)) continue;
+    matchedRules.push(rule);
+
+    switch (rule.type) {
+      case "route": {
+        if (rule.ruleType === "redirect") {
+          redirectLocation = rule.to;
+        } else if (rule.ruleType === "rewrite") {
+          targetUrl = new URL(targetUrl.toString());
+          targetUrl.pathname = rule.to;
+        }
+        break;
+      }
+      case "cache": {
+        cacheTtl = rule.ttl;
+        headersToSet.push({
+          name: "Cache-Control",
+          value: `public, max-age=${rule.ttl}`
+        });
+        break;
+      }
+      case "header": {
+        if (rule.action === "add" || rule.action === "modify") {
+          if (rule.value !== undefined)
+            headersToSet.push({ name: rule.name, value: rule.value });
+        }
+        if (rule.action === "remove") {
+          headersToRemove.push(rule.name);
+        }
+        break;
+      }
+      case "security": {
+        if (rule.csp)
+          headersToSet.push({
+            name: "Content-Security-Policy",
+            value: rule.csp
+          });
+        if (rule.hstsMaxAge)
+          headersToSet.push({
+            name: "Strict-Transport-Security",
+            value: `max-age=${rule.hstsMaxAge}`
+          });
+        if (rule.xfo)
+          headersToSet.push({ name: "X-Frame-Options", value: rule.xfo });
+        if (rule.referrerPolicy)
+          headersToSet.push({
+            name: "Referrer-Policy",
+            value: rule.referrerPolicy
+          });
+        if (rule.permissionsPolicy)
+          headersToSet.push({
+            name: "Permissions-Policy",
+            value: rule.permissionsPolicy
+          });
+        break;
+      }
+      case "banner": {
+        bannerRule = rule;
+        break;
+      }
+      case "canary": {
+        const fingerprint =
+          request.headers.get("CF-Connecting-IP") ??
+          request.headers.get("X-Forwarded-For") ??
+          url.pathname;
+        const ratio = deterministicRatio(fingerprint + rule.path);
+        if (ratio < rule.percentage) {
+          selectedRouteLabel = rule.canaryOrigin;
+          if (rule.canaryOrigin.startsWith("http")) {
+            targetUrl = new URL(rule.canaryOrigin);
+          } else if (rule.canaryOrigin.startsWith("/")) {
+            targetUrl = new URL(targetUrl.toString());
+            targetUrl.pathname = rule.canaryOrigin;
+          }
+        } else {
+          selectedRouteLabel = rule.primaryOrigin;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  if (redirectLocation) {
+    return Response.redirect(redirectLocation, 302);
+  }
+
+  if (!env.ORIGIN_URL) {
+    const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
+    headersToRemove.forEach((header) => headers.delete(header));
+    headersToSet.forEach(({ name, value }) => headers.set(name, value));
+    headers.set("X-Edge-Composer-Version", active.versionId ?? "in-memory");
+    headers.set("X-Edge-Composer-Route", selectedRouteLabel);
+    if (matchedRules.length) {
+      headers.set(
+        "X-Edge-Composer-Rules",
+        matchedRules.map((r) => r.type).join(",")
+      );
+    }
+    const html = `<!doctype html><html><head><meta charset="utf-8" /><title>EdgeComposer Preview</title></head><body style="font-family:system-ui;background:#0f1729;color:#f8fafc;padding:32px;"><h1>Edge Composer Placeholder</h1><p>No origin is configured. Set <code>ORIGIN_URL</code> to proxy a real backend.</p><pre style="background:rgba(15,23,42,0.9);padding:16px;border-radius:8px;">${JSON.stringify({ pathname: url.pathname, matchedRules }, null, 2)}</pre></body></html>`;
+    const payload = bannerRule ? injectBanner(html, bannerRule) : html;
+    return new Response(payload, { status: 200, headers });
+  }
+
+  const originUrlString = new URL(
+    targetUrl.pathname + targetUrl.search + targetUrl.hash,
+    env.ORIGIN_URL
+  ).toString();
+  const initHeaders = new Headers(request.headers);
+  const fetchInit: RequestInit = {
+    method: request.method,
+    headers: initHeaders
+  };
+  if (cacheTtl) {
+    (fetchInit as RequestInit & { cf?: Record<string, unknown> }).cf = {
+      cacheTtl
+    };
+  }
+
+  const originResponse = await fetch(originUrlString, fetchInit);
+  const responseHeaders = new Headers(originResponse.headers);
+  headersToRemove.forEach((header) => responseHeaders.delete(header));
+  headersToSet.forEach(({ name, value }) => responseHeaders.set(name, value));
+  responseHeaders.set(
+    "X-Edge-Composer-Version",
+    active.versionId ?? "in-memory"
+  );
+  responseHeaders.set("X-Edge-Composer-Route", selectedRouteLabel);
+  if (matchedRules.length) {
+    responseHeaders.set(
+      "X-Edge-Composer-Rules",
+      matchedRules.map((r) => r.type).join(",")
+    );
+  }
+
+  if (
+    bannerRule &&
+    /text\/html/i.test(responseHeaders.get("content-type") || "")
+  ) {
+    const originalHtml = await originResponse.text();
+    const injected = injectBanner(originalHtml, bannerRule);
+    return new Response(injected, {
+      status: originResponse.status,
+      headers: responseHeaders
+    });
+  }
+
+  return new Response(originResponse.body, {
+    status: originResponse.status,
+    headers: responseHeaders
+  });
+}
+
+function matchesRulePath(rule: CDNRule, pathname: string): boolean {
+  const pattern = (rule as any).path ?? (rule as any).from ?? "*";
+  if (!pattern) return true;
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, ".*")
+    .replace(/\*/g, "[^/]*");
+  const regex = new RegExp(`^${escaped}$`);
+  return regex.test(pathname);
+}
+
+function deterministicRatio(input: string): number {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 33) ^ input.charCodeAt(i);
+  }
+  return ((hash >>> 0) % 1000) / 1000;
+}
+
+function injectBanner(html: string, rule: CDNRule): string {
+  if (rule.type !== "banner") return html;
+  const banner = `<div style="position:fixed;bottom:0;left:0;right:0;padding:12px;background:#134e4a;color:#ecfeff;text-align:center;font-family:system-ui;font-size:14px;">${rule.message}</div>`;
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${banner}</body>`);
+  }
+  return html + banner;
 }

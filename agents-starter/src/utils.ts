@@ -136,7 +136,9 @@ export function cleanupMessages(messages: UIMessage[]): UIMessage[] {
  * Output:
  *   [{ name: 'get_weather', args: { city: 'San Francisco', metric: 'celsius' } }, ...]
  */
-export function parseBracketToolCalls(text: string): Array<{ name: string; args: Record<string, unknown> }> {
+export function parseBracketToolCalls(
+  text: string
+): Array<{ name: string; args: Record<string, unknown> }> {
   const result: Array<{ name: string; args: Record<string, unknown> }> = [];
   if (!text) return result;
 
@@ -146,15 +148,15 @@ export function parseBracketToolCalls(text: string): Array<{ name: string; args:
 
   // Split top-level by comma that separates calls (avoid commas inside parentheses)
   const calls: string[] = [];
-  let buf = '';
+  let buf = "";
   let depth = 0;
   for (let i = 0; i < inner.length; i++) {
     const ch = inner[i];
-    if (ch === '(') depth++;
-    if (ch === ')') depth = Math.max(0, depth - 1);
-    if (ch === ',' && depth === 0) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
       if (buf.trim()) calls.push(buf.trim());
-      buf = '';
+      buf = "";
       continue;
     }
     buf += ch;
@@ -170,7 +172,7 @@ export function parseBracketToolCalls(text: string): Array<{ name: string; args:
     if (argsSrc.length > 0) {
       // Split on commas at depth 0 for key=value pairs
       const parts: string[] = [];
-      let pbuf = '';
+      let pbuf = "";
       let pdepth = 0;
       let inStr: false | "'" | '"' = false;
       for (let i = 0; i < argsSrc.length; i++) {
@@ -178,11 +180,11 @@ export function parseBracketToolCalls(text: string): Array<{ name: string; args:
         if ((c === '"' || c === "'") && !inStr) inStr = c as '"' | "'";
         else if (inStr && c === inStr) inStr = false;
         else if (!inStr) {
-          if (c === '(') pdepth++;
-          else if (c === ')') pdepth = Math.max(0, pdepth - 1);
-          else if (c === ',' && pdepth === 0) {
+          if (c === "(") pdepth++;
+          else if (c === ")") pdepth = Math.max(0, pdepth - 1);
+          else if (c === "," && pdepth === 0) {
             if (pbuf.trim()) parts.push(pbuf.trim());
-            pbuf = '';
+            pbuf = "";
             continue;
           }
         }
@@ -191,19 +193,22 @@ export function parseBracketToolCalls(text: string): Array<{ name: string; args:
       if (pbuf.trim()) parts.push(pbuf.trim());
 
       for (const kv of parts) {
-        const eq = kv.indexOf('=');
+        const eq = kv.indexOf("=");
         if (eq === -1) continue;
         const key = kv.slice(0, eq).trim();
         let valueRaw = kv.slice(eq + 1).trim();
         // Normalize quotes and simple types
-        if ((valueRaw.startsWith("'") && valueRaw.endsWith("'")) || (valueRaw.startsWith('"') && valueRaw.endsWith('"'))) {
+        if (
+          (valueRaw.startsWith("'") && valueRaw.endsWith("'")) ||
+          (valueRaw.startsWith('"') && valueRaw.endsWith('"'))
+        ) {
           valueRaw = valueRaw.slice(1, -1);
           args[key] = valueRaw;
         } else if (/^\d+$/.test(valueRaw)) {
           args[key] = Number(valueRaw);
         } else if (/^(true|false)$/i.test(valueRaw)) {
           args[key] = /^true$/i.test(valueRaw);
-        } else if (valueRaw === 'null' || valueRaw === 'None') {
+        } else if (valueRaw === "null" || valueRaw === "None") {
           args[key] = null;
         } else {
           // Fallback to string

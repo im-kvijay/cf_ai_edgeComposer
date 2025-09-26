@@ -9,7 +9,10 @@ interface RuleDetailsPanelProps {
   rule: CDNRule | null;
   onSelectRule: (index: number | null) => void;
   onResetRule: (ruleIndex: number) => Promise<void> | void;
-  onUpdateRule: (ruleIndex: number, patch: Partial<CDNRule>) => Promise<void> | void;
+  onUpdateRule: (
+    ruleIndex: number,
+    patch: Partial<CDNRule>
+  ) => Promise<void> | void;
   onRemoveRule: (ruleIndex: number) => Promise<void> | void;
   linkedChecklistItem?: ChecklistItem | null;
 }
@@ -24,7 +27,7 @@ export function RuleDetailsPanel({
   linkedChecklistItem
 }: RuleDetailsPanelProps) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
-  const [filter, setFilter] = useState<string>('all');
+  const [filter, setFilter] = useState<string>("all");
 
   const details = useMemo(() => {
     if (!rule) return null;
@@ -34,7 +37,11 @@ export function RuleDetailsPanel({
         .filter(([key]) => key !== "type")
         .map(([key, value]) => ({
           label: key,
-          value: Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : `${value}`
+          value: Array.isArray(value)
+            ? value.join(", ")
+            : typeof value === "object"
+              ? JSON.stringify(value)
+              : `${value}`
         }))
     };
   }, [rule]);
@@ -45,8 +52,8 @@ export function RuleDetailsPanel({
   };
 
   const filtered = useMemo(() => {
-    if (filter === 'all') return rules;
-    return rules.filter(r => r.type === filter);
+    if (filter === "all") return rules;
+    return rules.filter((r) => r.type === filter);
   }, [rules, filter]);
 
   const counts = useMemo(() => {
@@ -59,8 +66,12 @@ export function RuleDetailsPanel({
     <div className="flex-1 overflow-auto border-b border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">Current Rules</div>
-          <div className="text-xs text-neutral-500 dark:text-neutral-400">{rules.length} total rules</div>
+          <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
+            Current Rules
+          </div>
+          <div className="text-xs text-neutral-500 dark:text-neutral-400">
+            {rules.length} total rules
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <select
@@ -70,7 +81,9 @@ export function RuleDetailsPanel({
           >
             <option value="all">All</option>
             {[...counts.keys()].map((k) => (
-              <option key={k} value={k}>{k} ({counts.get(k)})</option>
+              <option key={k} value={k}>
+                {k} ({counts.get(k)})
+              </option>
             ))}
           </select>
         </div>
@@ -83,7 +96,8 @@ export function RuleDetailsPanel({
 
       {filtered.length === 0 ? (
         <div className="rounded border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-          No rules applied yet. Generate and apply a plan to populate this panel.
+          No rules applied yet. Generate and apply a plan to populate this
+          panel.
         </div>
       ) : (
         <div className="space-y-3">
@@ -104,26 +118,37 @@ export function RuleDetailsPanel({
                   onClick={() => handleToggle(index)}
                 >
                   <div>
-                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Rule #{index + 1}</div>
-                    <div className="font-medium text-neutral-900 dark:text-neutral-100">{item.type}</div>
+                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                      Rule #{index + 1}
+                    </div>
+                    <div className="font-medium text-neutral-900 dark:text-neutral-100">
+                      {item.type}
+                    </div>
                   </div>
-                  <div className="text-xs text-neutral-400">{isExpanded ? "Hide" : "Show"}</div>
+                  <div className="text-xs text-neutral-400">
+                    {isExpanded ? "Hide" : "Show"}
+                  </div>
                 </button>
 
                 {isExpanded ? (
                   <div className="space-y-3 border-t border-neutral-200 px-3 py-3 text-sm dark:border-neutral-800">
                     <div className="grid grid-cols-1 gap-2">
                       {Object.entries(item).map(([key, value]) => (
-                        <div key={key} className="flex items-baseline justify-between gap-4">
-                          <div className="text-xs uppercase tracking-wide text-neutral-400">{key}</div>
+                        <div
+                          key={key}
+                          className="flex items-baseline justify-between gap-4"
+                        >
+                          <div className="text-xs uppercase tracking-wide text-neutral-400">
+                            {key}
+                          </div>
                           <div className="flex-1 text-right text-neutral-800 dark:text-neutral-200">
                             {Array.isArray(value)
                               ? value.length === 0
-                                ? "—"
+                                ? "--"
                                 : value.join(", ")
                               : typeof value === "object" && value
                                 ? JSON.stringify(value)
-                                : value?.toString() ?? "—"}
+                                : (value?.toString() ?? "--")}
                           </div>
                         </div>
                       ))}
@@ -162,12 +187,21 @@ export function RuleDetailsPanel({
 
       {details ? (
         <div className="mt-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-xs dark:border-neutral-800 dark:bg-neutral-900/60">
-          <div className="mb-2 text-sm font-semibold text-neutral-900 dark:text-neutral-100">Selected Rule</div>
+          <div className="mb-2 text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+            Selected Rule
+          </div>
           <div className="grid grid-cols-1 gap-2">
             {details.rows.map((row) => (
-              <div key={row.label} className="flex items-baseline justify-between gap-4">
-                <div className="text-neutral-500 dark:text-neutral-400">{row.label}</div>
-                <div className="text-right text-neutral-800 dark:text-neutral-100">{row.value}</div>
+              <div
+                key={row.label}
+                className="flex items-baseline justify-between gap-4"
+              >
+                <div className="text-neutral-500 dark:text-neutral-400">
+                  {row.label}
+                </div>
+                <div className="text-right text-neutral-800 dark:text-neutral-100">
+                  {row.value || "--"}
+                </div>
               </div>
             ))}
           </div>
