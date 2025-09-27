@@ -1,13 +1,25 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's alright */
-import { useEffect, useMemo, useState } from "react";
-
-// Component imports
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/button/Button";
 import { Textarea } from "@/components/textarea/Textarea";
 import { Loader } from "@/components/loader/Loader";
 import { RuleDetailsPanel } from "@/components/rules/RuleDetailsPanel";
 import { PlaybooksPanel } from "@/components/playbooks/PlaybooksPanel";
+import { ChatView } from "@/components/chat/ChatView";
 import { cloneDefaultRules } from "@/default-plan";
+import {
+  extractRulePath,
+  formatKeyLabel,
+  renderSummarySection,
+  summarizeValue
+} from "@/lib/presenters";
+import type {
+  CDNPlan,
+  ChatMessage,
+  GenerateResponse,
+  PlanInsights,
+  PreviewMetrics
+} from "@/types/app";
 import type {
   PlaybookState,
   PlaybookStep,
@@ -15,11 +27,9 @@ import type {
   TodoEntry,
   ResearchNote,
   EdgePlanVersion,
-  PreviewTokenState,
-  ToolTraceEntry
+  PreviewTokenState
 } from "@/shared-types";
 
-// Icon imports
 import {
   Moon,
   Sun,
@@ -28,145 +38,6 @@ import {
   ArrowRight,
   ArrowClockwise
 } from "@phosphor-icons/react";
-
-// Types for our CDN configuration
-interface CDNPlan {
-  rules: CDNRule[];
-}
-
-type ChatMessage =
-  | { role: "user"; text: string }
-  | { role: "assistant"; text: string }
-  | {
-      role: "tool";
-      summary: string;
-      details?: {
-        input?: unknown;
-        output?: unknown;
-        status?: string;
-        startedAt?: string;
-        finishedAt?: string;
-      };
-    };
-
-interface PreviewMetrics {
-  version: string;
-  route: "v1" | "v2";
-  cacheStatus: "HIT" | "MISS";
-  hitCount: number;
-  missCount: number;
-  p95Latency: number;
-}
-
-interface PlanInsights {
-  summary: string | null;
-  validation: { valid: boolean; errors: string[]; warnings: string[] };
-  risk: { score: number; classification: string; reasons: string[] } | null;
-  riskAudit?: string | null;
-}
-
-interface GenerateResponse {
-  config?: Array<Partial<CDNRule>>;
-  insights?: PlanInsights | null;
-  draftVersionId?: string;
-  assistant?: string;
-  trace?: ToolTraceEntry[];
-  todos?: TodoEntry[];
-  notes?: ResearchNote[];
-  playbook?: PlaybookState | null;
-}
-
-const MAX_SUMMARY_ITEMS = 6;
-
-function formatKeyLabel(key: string): string {
-  return key
-    .replace(/[_-]+/g, " ")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function summarizeValue(value: unknown, depth = 0): string {
-  if (value === undefined || value === null) return "--";
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed || "--";
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "[]";
-    if (depth >= 1)
-      return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
-    const preview = value
-      .slice(0, 3)
-      .map((item) => summarizeValue(item, depth + 1))
-      .join(", ");
-    return `[${preview}${value.length > 3 ? ", ..." : ""}]`;
-  }
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return "{}";
-    if (depth >= 1) {
-      return `{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`;
-    }
-    const preview = entries
-      .slice(0, 3)
-      .map(
-        ([key, val]) =>
-          `${formatKeyLabel(key)}: ${summarizeValue(val, depth + 1)}`
-      )
-      .join(", ");
-    return `{ ${preview}${entries.length > 3 ? ", ..." : ""} }`;
-  }
-  return String(value);
-}
-
-function renderSummarySection(
-  label: string,
-  data: unknown
-): JSX.Element | null {
-  if (data === undefined || data === null) return null;
-
-  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
-    const entries = Object.entries(data as Record<string, unknown>);
-    if (entries.length === 0) return null;
-    return (
-      <div className="rounded bg-neutral-100 dark:bg-neutral-900/50 p-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-          {label}
-        </div>
-        <ul className="mt-1 space-y-1">
-          {entries.slice(0, MAX_SUMMARY_ITEMS).map(([key, value], index) => (
-            <li
-              key={`${key}-${index}`}
-              className="text-neutral-700 dark:text-neutral-200"
-            >
-              <span className="font-medium">{formatKeyLabel(key)}:</span>{" "}
-              {summarizeValue(value)}
-            </li>
-          ))}
-          {entries.length > MAX_SUMMARY_ITEMS ? (
-            <li className="text-neutral-500 dark:text-neutral-400">...</li>
-          ) : null}
-        </ul>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded bg-neutral-100 dark:bg-neutral-900/50 p-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-        {label}
-      </div>
-      <div className="mt-1 text-neutral-700 dark:text-neutral-200">
-        {summarizeValue(data)}
-      </div>
-    </div>
-  );
-}
 
 export default function CDNConfigurator() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -178,7 +49,7 @@ export default function CDNConfigurator() {
     rules: cloneDefaultRules()
   });
   const [proposedPlan, setProposedPlan] = useState<CDNPlan | null>(null);
-  const [previewMetrics, setPreviewMetrics] = useState<PreviewMetrics>({
+  const [previewMetrics, _setPreviewMetrics] = useState<PreviewMetrics>({
     version: "v1.0",
     route: "v1",
     cacheStatus: "HIT",
@@ -209,7 +80,7 @@ export default function CDNConfigurator() {
     }>
   >([]);
   const [isCreatingToken, setIsCreatingToken] = useState(false);
-  const refreshVersions = async () => {
+  const refreshVersions = useCallback(async () => {
     try {
       const res = await fetch("/api/versions");
       if (res.ok) {
@@ -227,9 +98,9 @@ export default function CDNConfigurator() {
     } catch (err) {
       console.error("load versions failed", err);
     }
-  };
+  }, []);
 
-  const refreshTokens = async () => {
+  const refreshTokens = useCallback(async () => {
     try {
       const res = await fetch("/api/tokens");
       if (res.ok) {
@@ -248,7 +119,7 @@ export default function CDNConfigurator() {
     } catch (err) {
       console.error("load tokens failed", err);
     }
-  };
+  }, []);
 
   const riskLevel = planInsights?.risk?.classification;
   const riskScore = planInsights?.risk?.score;
@@ -271,7 +142,6 @@ export default function CDNConfigurator() {
   const validationWarnings = planInsights?.validation?.warnings ?? [];
   const validationErrors = planInsights?.validation?.errors ?? [];
 
-  // --- Playbooks and rule helpers ---
   function makeId() {
     try {
       return crypto.randomUUID();
@@ -279,6 +149,10 @@ export default function CDNConfigurator() {
       return Math.random().toString(36).slice(2);
     }
   }
+
+  const pushMessage = useCallback((message: ChatMessage) => {
+    setMessages((prev) => [...prev, message]);
+  }, []);
 
   function presetRulesForScenario(
     scenario: PlaybookState["scenario"]
@@ -514,6 +388,7 @@ export default function CDNConfigurator() {
   async function advancePlaybookStep(): Promise<PlaybookState | null> {
     if (!playbookState) return null;
     const idx = playbookState.activeStepIndex;
+    const currentStep = playbookState.steps[idx];
     const steps: PlaybookStep[] = playbookState.steps.map((step, index) => ({
       ...step,
       status: index <= idx ? "completed" : step.status
@@ -527,10 +402,15 @@ export default function CDNConfigurator() {
         nextIndex >= steps.length ? new Date().toISOString() : undefined
     };
     setPlaybookState(updated);
+    if (currentStep && /apply/i.test(currentStep.title) && proposedPlan) {
+      setCurrentPlan({ rules: proposedPlan.rules });
+      setProposedPlan(null);
+      setDraftVersionId(null);
+      setPlanInsights(null);
+    }
     return updated;
   }
 
-  // Rule mutate helpers used by RuleDetailsPanel
   async function resetRule(ruleIndex: number) {
     const copy = [...currentPlan.rules];
     const existing = copy[ruleIndex];
@@ -556,7 +436,6 @@ export default function CDNConfigurator() {
     return copy;
   }
 
-  // Hydrate current rules from backend (if persisted)
   useEffect(() => {
     (async () => {
       try {
@@ -566,18 +445,24 @@ export default function CDNConfigurator() {
         ]);
 
         if (activeRes.ok) {
-          const data = await activeRes.json();
-          if (data?.active?.plan?.rules) {
-            setCurrentPlan({ rules: data.active.plan.rules });
-            setActiveVersionId(data.active.id ?? null);
+          const data = (await activeRes.json()) as {
+            active?: EdgePlanVersion | null;
+          };
+          const active = data?.active;
+          if (active?.plan?.rules) {
+            setCurrentPlan({ rules: active.plan.rules });
+            setActiveVersionId(active.id ?? null);
           }
         }
 
         if (draftRes.ok) {
-          const data = await draftRes.json();
-          if (data?.draft?.plan?.rules) {
-            setProposedPlan({ rules: data.draft.plan.rules });
-            setDraftVersionId(data.draft.id ?? null);
+          const data = (await draftRes.json()) as {
+            draft?: EdgePlanVersion | null;
+          };
+          const draft = data?.draft;
+          if (draft?.plan?.rules) {
+            setProposedPlan({ rules: draft.plan.rules });
+            setDraftVersionId(draft.id ?? null);
           }
         }
 
@@ -586,7 +471,7 @@ export default function CDNConfigurator() {
         console.error("bootstrap fetch failed", err);
       }
     })();
-  }, []);
+  }, [refreshVersions, refreshTokens]);
 
   useEffect(() => {
     if (theme === "dark") {
@@ -608,15 +493,13 @@ export default function CDNConfigurator() {
     setInput(e.target.value);
   };
 
-  // Handle the main chat form submission: send the prompt to the backend and stream back plan updates.
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isGenerating) return;
 
     try {
       setIsGenerating(true);
-      // Record the raw user prompt in the transcript before calling the backend.
-      setMessages((prev) => [...prev, { role: "user", text: input }]);
+      pushMessage({ id: makeId(), role: "user", text: input });
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -624,13 +507,11 @@ export default function CDNConfigurator() {
       });
       if (!res.ok) {
         console.error("Generate failed", res.status);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            text: `There was an error generating a plan (HTTP ${res.status}). Please try a more specific request.`
-          }
-        ]);
+        pushMessage({
+          id: makeId(),
+          role: "assistant",
+          text: `There was an error generating a plan (HTTP ${res.status}). Please try a more specific request.`
+        });
         return;
       }
       const data = (await res.json()) as GenerateResponse;
@@ -643,10 +524,7 @@ export default function CDNConfigurator() {
         setDraftVersionId(data.draftVersionId);
       }
       if (data.assistant) {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", text: data.assistant }
-        ]);
+        pushMessage({ id: makeId(), role: "assistant", text: data.assistant });
       }
       if (Array.isArray(data.trace)) {
         const toolMsgs: ChatMessage[] = data.trace.map((entry) => {
@@ -654,6 +532,7 @@ export default function CDNConfigurator() {
           const ok = entry.status === "success";
           const summary = `${ok ? "OK" : "ERR"} ${title}`;
           return {
+            id: entry.id || makeId(),
             role: "tool" as const,
             summary,
             details: {
@@ -674,13 +553,11 @@ export default function CDNConfigurator() {
       if (data.playbook) setPlaybookState(data.playbook);
     } catch (err) {
       console.error("Generate error", err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: "I hit an error generating the plan. Please try again."
-        }
-      ]);
+      pushMessage({
+        id: makeId(),
+        role: "assistant",
+        text: "I hit an error generating the plan. Please try again."
+      });
       setPlanInsights(null);
     } finally {
       setInput("");
@@ -706,7 +583,7 @@ export default function CDNConfigurator() {
         body: JSON.stringify({ versionId: draftVersionId })
       });
       if (!res.ok) return;
-      const data = await res.json();
+      const data: { active?: EdgePlanVersion | null } = await res.json();
       if (data?.active?.plan?.rules) {
         setCurrentPlan({ rules: data.active.plan.rules });
         setActiveVersionId(data.active.id ?? null);
@@ -736,17 +613,18 @@ export default function CDNConfigurator() {
         })
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data?.summary) {
+        const data: { summary?: string } = await res.json();
+        if (typeof data.summary === "string") {
+          const summaryText = data.summary;
           setPlanInsights((prev) => ({
-            summary: data.summary,
+            summary: summaryText,
             validation: prev?.validation ?? {
               valid: true,
               errors: [],
               warnings: []
             },
             risk: prev?.risk ?? null,
-            riskAudit: prev?.riskAudit
+            riskAudit: prev?.riskAudit ?? null
           }));
         }
       }
@@ -767,7 +645,7 @@ export default function CDNConfigurator() {
         body: JSON.stringify({ versionId: candidates[0].id })
       });
       if (res.ok) {
-        const data = await res.json();
+        const data: { active?: EdgePlanVersion | null } = await res.json();
         if (data?.active?.plan?.rules) {
           setCurrentPlan({ rules: data.active.plan.rules });
           setActiveVersionId(data.active.id ?? null);
@@ -915,88 +793,6 @@ export default function CDNConfigurator() {
     );
   };
 
-  const ChatView = () => (
-    <div className="p-4 border-t border-neutral-200 dark:border-neutral-800">
-      <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">
-        Conversation
-      </div>
-      <div className="space-y-2 max-h-56 overflow-auto text-sm">
-        {messages.length === 0 ? (
-          <div className="text-neutral-500">No messages yet.</div>
-        ) : (
-          messages.map((m, i) => {
-            const label =
-              m.role === "user"
-                ? "User"
-                : m.role === "assistant"
-                  ? "Assistant"
-                  : "Tool";
-            return (
-              <div
-                key={i}
-                className={`rounded p-2 ${m.role === "user" ? "bg-blue-50 dark:bg-blue-900/20" : m.role === "tool" ? "bg-neutral-100 dark:bg-neutral-900/60" : "bg-green-50 dark:bg-green-900/20"}`}
-              >
-                <div className="text-xs uppercase tracking-wide text-neutral-500 mb-1">
-                  {label}
-                </div>
-                <div className="whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-200">
-                  {m.role === "tool" ? renderToolMessage(m) : m.text}
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-      {(todos.length > 0 || notes.length > 0) && (
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-          {todos.length > 0 && (
-            <div>
-              <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">
-                Todo
-              </div>
-              <ul className="space-y-1 text-sm">
-                {todos.map((t) => (
-                  <li
-                    key={t.id}
-                    className="flex items-center justify-between bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded"
-                  >
-                    <span
-                      className={`mr-2 ${t.status === "done" ? "line-through opacity-70" : ""}`}
-                    >
-                      {t.text}
-                    </span>
-                    <span
-                      className={`text-xs px-2 py-0.5 rounded ${t.status === "done" ? "bg-green-600 text-white" : "bg-yellow-600 text-white"}`}
-                    >
-                      {t.status}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {notes.length > 0 && (
-            <div>
-              <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-2">
-                Research
-              </div>
-              <ul className="space-y-1 text-sm">
-                {notes.map((n) => (
-                  <li
-                    key={n.id}
-                    className="bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded"
-                  >
-                    {n.note}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-
   const revertChanges = () => {
     setProposedPlan(null);
     setPlanInsights(null);
@@ -1017,7 +813,15 @@ export default function CDNConfigurator() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="flex items-center justify-center h-8 w-8 bg-blue-600 rounded-lg">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="white"
+                  role="img"
+                  aria-labelledby="app-logo-title"
+                >
+                  <title id="app-logo-title">Edge Composer Logo</title>
                   <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
                 </svg>
               </div>
@@ -1038,7 +842,12 @@ export default function CDNConfigurator() {
             </div>
           </div>
         </div>
-        <ChatView />
+        <ChatView
+          messages={messages}
+          todos={todos}
+          notes={notes}
+          renderToolMessage={renderToolMessage}
+        />
 
         {/* Chat Input */}
         <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
@@ -1075,7 +884,7 @@ export default function CDNConfigurator() {
                 Use natural language to describe your CDN configuration
               </span>
               <div className="flex items-center gap-2">
-                {proposedPlan && (
+                {proposedPlan ? (
                   <>
                     <Button
                       size="sm"
@@ -1119,18 +928,24 @@ export default function CDNConfigurator() {
                     >
                       Rollback
                     </Button>
-                    <Button
-                      size="sm"
-                      onClick={createPreviewToken}
-                      className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
-                      disabled={
-                        isGenerating || !activeVersionId || isCreatingToken
-                      }
-                    >
-                      {isCreatingToken ? "Creating..." : "Preview Token"}
-                    </Button>
                   </>
-                )}
+                ) : null}
+                <Button
+                  size="sm"
+                  onClick={exportRules}
+                  className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                  disabled={isGenerating}
+                >
+                  Export
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={createPreviewToken}
+                  className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                  disabled={isGenerating || !activeVersionId || isCreatingToken}
+                >
+                  {isCreatingToken ? "Creating..." : "Preview Token"}
+                </Button>
               </div>
             </div>
           </form>
@@ -1195,17 +1010,17 @@ export default function CDNConfigurator() {
                       </div>
                     ) : (
                       <ul className="space-y-1">
-                        {validationWarnings.map((warn, idx) => (
+                        {validationWarnings.map((warn) => (
                           <li
-                            key={`warn-${idx}`}
+                            key={warn}
                             className="text-amber-600 dark:text-amber-300"
                           >
                             Warning: {warn}
                           </li>
                         ))}
-                        {validationErrors.map((err, idx) => (
+                        {validationErrors.map((err) => (
                           <li
-                            key={`err-${idx}`}
+                            key={err}
                             className="text-red-600 dark:text-red-300"
                           >
                             Error: {err}
@@ -1232,8 +1047,8 @@ export default function CDNConfigurator() {
                     )}
                     {riskReasons.length > 0 && (
                       <ul className="mt-2 space-y-1 text-xs text-neutral-600 dark:text-neutral-400">
-                        {riskReasons.map((reason, idx) => (
-                          <li key={`risk-${idx}`}>- {reason}</li>
+                        {riskReasons.map((reason) => (
+                          <li key={reason}>- {reason}</li>
                         ))}
                       </ul>
                     )}
@@ -1256,26 +1071,32 @@ export default function CDNConfigurator() {
                 <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
                   Current Configuration
                 </div>
-                {currentPlan.rules.map((rule, index) => (
-                  <div
-                    key={index}
-                    className="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-lg"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-mono bg-neutral-200 dark:bg-neutral-700 px-2 py-1 rounded">
-                        {rule.type}
-                      </span>
-                      {rule.path && (
-                        <span className="text-xs font-mono text-blue-600 dark:text-blue-400">
-                          {rule.path}
+                {currentPlan.rules.map((rule, index) => {
+                  const rulePath = extractRulePath(rule);
+                  const itemKey =
+                    rule.id ??
+                    `${rule.type}-${rulePath ?? rule.description ?? index}`;
+                  return (
+                    <div
+                      key={itemKey}
+                      className="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-lg"
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-mono bg-neutral-200 dark:bg-neutral-700 px-2 py-1 rounded">
+                          {rule.type}
                         </span>
-                      )}
+                        {rulePath && (
+                          <span className="text-xs font-mono text-blue-600 dark:text-blue-400">
+                            {rulePath}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-sm text-neutral-700 dark:text-neutral-300">
+                        {rule.description}
+                      </div>
                     </div>
-                    <div className="text-sm text-neutral-700 dark:text-neutral-300">
-                      {rule.description}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
 
                 <div className="flex items-center gap-2 my-4">
                   <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-600"></div>
@@ -1286,26 +1107,32 @@ export default function CDNConfigurator() {
                 <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
                   Proposed Configuration
                 </div>
-                {proposedPlan.rules.map((rule, index) => (
-                  <div
-                    key={index}
-                    className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-3 rounded-lg"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-mono bg-green-200 dark:bg-green-700 px-2 py-1 rounded">
-                        {rule.type}
-                      </span>
-                      {rule.path && (
-                        <span className="text-xs font-mono text-green-600 dark:text-green-400">
-                          {rule.path}
+                {proposedPlan.rules.map((rule, index) => {
+                  const rulePath = extractRulePath(rule);
+                  const itemKey =
+                    rule.id ??
+                    `${rule.type}-${rulePath ?? rule.description ?? index}`;
+                  return (
+                    <div
+                      key={itemKey}
+                      className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-3 rounded-lg"
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-mono bg-green-200 dark:bg-green-700 px-2 py-1 rounded">
+                          {rule.type}
                         </span>
-                      )}
+                        {rulePath && (
+                          <span className="text-xs font-mono text-green-600 dark:text-green-400">
+                            {rulePath}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-sm text-green-700 dark:text-green-300">
+                        {rule.description}
+                      </div>
                     </div>
-                    <div className="text-sm text-green-700 dark:text-green-300">
-                      {rule.description}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : (
@@ -1318,7 +1145,12 @@ export default function CDNConfigurator() {
                     viewBox="0 0 24 24"
                     fill="currentColor"
                     className="text-blue-600 dark:text-blue-400"
+                    role="img"
+                    aria-labelledby="empty-state-icon-title"
                   >
+                    <title id="empty-state-icon-title">
+                      Edge Composer Placeholder Icon
+                    </title>
                     <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
                   </svg>
                 </div>
@@ -1401,15 +1233,15 @@ export default function CDNConfigurator() {
           rules={currentPlan.rules}
           onResetRule={async (ruleIndex) => {
             const updated = await resetRule(ruleIndex);
-            setCurrentPlan((prev) => ({ rules: updated }));
+            setCurrentPlan((_prev) => ({ rules: updated }));
           }}
           onUpdateRule={async (ruleIndex, patch) => {
             const updated = await updateRule(ruleIndex, patch);
-            setCurrentPlan((prev) => ({ rules: updated }));
+            setCurrentPlan((_prev) => ({ rules: updated }));
           }}
           onRemoveRule={async (ruleIndex) => {
             const updated = await removeRule(ruleIndex);
-            setCurrentPlan((prev) => ({ rules: updated }));
+            setCurrentPlan((_prev) => ({ rules: updated }));
           }}
         />
         <PlaybooksPanel

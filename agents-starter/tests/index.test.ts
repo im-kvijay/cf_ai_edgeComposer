@@ -13,14 +13,15 @@ declare module "cloudflare:test" {
 }
 
 describe("Chat worker", () => {
-  it("responds with Not found", async () => {
+  it("serves the preview page", async () => {
     const request = new Request("http://example.com");
     // Create an empty context to pass to `worker.fetch()`
     const ctx = createExecutionContext();
     const response = await worker.fetch(request, env, ctx);
     // Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
     await waitOnExecutionContext(ctx);
-    expect(await response.text()).toBe("Not found");
-    expect(response.status).toBe(404);
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).toContain("Edge Composer Preview");
   });
 });

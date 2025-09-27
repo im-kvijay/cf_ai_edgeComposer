@@ -45,6 +45,15 @@ const bannerAudienceSchema = z.object({
   geo: z.array(z.string()).max(10).optional()
 });
 
+const SUMMARY_FOCUS = [
+  "cache",
+  "routing",
+  "security",
+  "performance",
+  "runtime"
+] as const;
+type SummaryFocus = (typeof SUMMARY_FOCUS)[number];
+
 const transformActionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("header"),
@@ -626,7 +635,13 @@ export function createCDNTools(
         canaryOrigin,
         percentage,
         stickyBy,
-        metricGuardrail,
+        metricGuardrail: metricGuardrail
+          ? {
+              metric: metricGuardrail.metric,
+              operator: metricGuardrail.operator,
+              threshold: metricGuardrail.threshold
+            }
+          : undefined,
         description
       };
       plan.push(rule);
@@ -687,7 +702,13 @@ export function createCDNTools(
         type: "origin-shield",
         origins,
         tieredCaching,
-        healthcheck,
+        healthcheck: healthcheck
+          ? {
+              path: healthcheck.path,
+              intervalSeconds: healthcheck.intervalSeconds,
+              timeoutMs: healthcheck.timeoutMs
+            }
+          : undefined,
         description
       };
       plan.push(rule);
@@ -705,16 +726,36 @@ export function createCDNTools(
       "Add a request/response transform (headers, HTML injection, rewrite)",
     inputSchema: INPUT_SCHEMAS.transform,
     execute: async ({ path, phase, action, description }) => {
+      const normalizedAction: TransformRule["action"] =
+        action.kind === "header"
+          ? {
+              kind: "header",
+              operation: action.operation,
+              header: action.header,
+              value: action.value
+            }
+          : action.kind === "html-inject"
+            ? {
+                kind: "html-inject",
+                position: action.position,
+                markup: action.markup
+              }
+            : { kind: "rewrite-url", to: action.to };
+
       const rule: TransformRule = {
         id: crypto.randomUUID(),
         type: "transform",
         path,
         phase,
-        action,
+        action: normalizedAction,
         description
       };
       plan.push(rule);
-      record("addTransformRule", { path, phase, action, description }, rule);
+      record(
+        "addTransformRule",
+        { path, phase, action: normalizedAction, description },
+        rule
+      );
       return rule;
     }
   });
@@ -866,11 +907,7 @@ export function createCDNTools(
       "Generate a short natural-language summary of the current plan",
     inputSchema: z
       .object({
-        focus: z
-          .array(
-            z.enum(["cache", "routing", "security", "performance", "runtime"])
-          )
-          .optional()
+        focus: z.array(z.enum(SUMMARY_FOCUS)).optional()
       })
       .optional(),
     execute: async ({ focus } = {}) => {
@@ -889,9 +926,10 @@ export function createCDNTools(
       }
 
       const lines: string[] = [];
-      const allowed = focus && focus.length > 0 ? new Set(focus) : null;
+      const allowed =
+        focus && focus.length > 0 ? new Set<SummaryFocus>(focus) : null;
 
-      const addLine = (type: string, text: string) => {
+      const addLine = (type: SummaryFocus, text: string) => {
         if (allowed && !allowed.has(type)) return;
         lines.push(text);
       };

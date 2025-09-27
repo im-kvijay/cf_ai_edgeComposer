@@ -147,3 +147,6 @@ dist
 !.dev.vars.example
 .env*
 !.env.example
+
+# Build artifacts
+public/assets/

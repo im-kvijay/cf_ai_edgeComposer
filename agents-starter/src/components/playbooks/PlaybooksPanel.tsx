@@ -65,7 +65,7 @@ export function PlaybooksPanel({
         </div>
         <Button
           size="sm"
-          variant="outline"
+          variant="tertiary"
           className="h-7"
           onClick={onAdvanceStep}
           disabled={isLoading || !state}

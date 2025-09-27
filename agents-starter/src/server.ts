@@ -24,17 +24,11 @@ import type {
   TodoEntry,
   ResearchNote,
   EdgePlan,
-  EdgePlanVersion
+  EdgePlanVersion,
+  PreviewTokenState
 } from "@/shared-types";
-import { ConfigDO } from "./config-do";
-// import { env } from "cloudflare:workers";
-
-// const model = openai("gpt-4o-2024-11-20"); // OpenAI provider (disabled)
-// Cloudflare AI Gateway
-// const openai = createOpenAI({
-//   apiKey: env.OPENAI_API_KEY,
-//   baseURL: env.GATEWAY_BASE_URL,
-// });
+import type { ConfigDO } from "./config-do";
+import { createDefaultPlanVersion } from "./default-plan";
 
 /**
  * Chat Agent implementation that handles real-time AI chat interactions
@@ -47,34 +41,47 @@ export class Chat extends AIChatAgent<Env> {
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     _options?: { abortSignal?: AbortSignal; model?: string }
   ) {
-    // const mcpConnection = await this.mcp.connect(
-    //   "https://path-to-mcp-server/sse"
-    // );
-
-    // Collect all tools, including MCP tools
     const allTools = {
       ...tools,
       ...this.mcp.getAITools()
     };
 
-    // Initialize Workers AI provider using the bound AI service
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
-        // Prefer model from the last user message metadata, then options, then default
+        const extractModel = (message: unknown): string | undefined => {
+          if (typeof message !== "object" || message === null) return undefined;
+          const metadata = (message as { metadata?: { model?: unknown } })
+            .metadata;
+          if (!metadata || typeof metadata !== "object") return undefined;
+          const modelValue = (metadata as { model?: unknown }).model;
+          return typeof modelValue === "string" ? modelValue : undefined;
+        };
+
+        const isUserMessage = (message: unknown): boolean => {
+          if (typeof message !== "object" || message === null) return false;
+          const roleValue = (message as { role?: unknown }).role;
+          return roleValue === "user";
+        };
+
         let metaModel: string | undefined;
         for (let i = this.messages.length - 1; i >= 0; i--) {
-          const msg = this.messages[i] as any;
-          if (msg?.role === "user" && msg?.metadata?.model) {
-            metaModel = msg.metadata.model as string;
-            break;
+          const candidate = this.messages[i];
+          if (isUserMessage(candidate)) {
+            const model = extractModel(candidate);
+            if (model) {
+              metaModel = model;
+              break;
+            }
           }
         }
-        // Fallback to the last message's metadata if present
         if (!metaModel && this.messages.length > 0) {
-          metaModel = (this.messages[this.messages.length - 1] as any)?.metadata
-            ?.model as string | undefined;
+          const fallbackMessage = this.messages[this.messages.length - 1];
+          const inferredModel = extractModel(fallbackMessage);
+          if (inferredModel) {
+            metaModel = inferredModel;
+          }
         }
         const modelId =
           metaModel ||
@@ -84,11 +91,8 @@ export class Chat extends AIChatAgent<Env> {
           workersai as unknown as (m: string) => ReturnType<typeof workersai>
         )(modelId);
 
-        // Clean up incomplete tool calls to prevent API errors
         const cleanedMessages = cleanupMessages(this.messages);
 
-        // Process any pending tool calls from previous messages
-        // This handles human-in-the-loop confirmations for tools
         const processedMessages = await processToolCalls({
           messages: cleanedMessages,
           dataStream: writer,
@@ -107,8 +111,6 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
           messages: convertToModelMessages(processedMessages),
           model,
           tools: allTools,
-          // Type boundary: streamText expects specific tool types, but base class uses ToolSet
-          // This is safe because our tools satisfy ToolSet interface (verified by 'satisfies' in tools.ts)
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof allTools
           >,
@@ -141,13 +143,62 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
   }
 }
 
-// In-memory fallback for storing the applied plan (dev-only; ephemeral in production)
 let CURRENT_PLAN: CDNRule[] = [];
+let CURRENT_ACTIVE_VERSION: EdgePlanVersion | null = null;
+let CURRENT_DRAFT_VERSION: EdgePlanVersion | null = null;
+let CURRENT_HISTORY: EdgePlanVersion[] = [];
+let CURRENT_TOKENS: PreviewTokenState[] = [];
+
+const cloneRules = (rules: CDNRule[]): CDNRule[] =>
+  rules.map((rule) => JSON.parse(JSON.stringify(rule)) as CDNRule);
+
+const cloneVersion = (version: EdgePlanVersion): EdgePlanVersion => ({
+  ...version,
+  plan: {
+    ...version.plan,
+    rules: cloneRules(version.plan.rules)
+  }
+});
+
+const recordHistory = (version: EdgePlanVersion) => {
+  const snapshot = cloneVersion(version);
+  CURRENT_HISTORY = [
+    snapshot,
+    ...CURRENT_HISTORY.filter((entry) => entry.id !== snapshot.id)
+  ];
+};
+
+const ensureFallbackActive = () => {
+  if (!CURRENT_ACTIVE_VERSION) {
+    const seeded = cloneVersion(createDefaultPlanVersion());
+    CURRENT_ACTIVE_VERSION = seeded;
+    CURRENT_PLAN = cloneRules(seeded.plan.rules);
+    recordHistory(seeded);
+  }
+};
+
+const pruneExpiredTokens = () => {
+  const now = Date.now();
+  CURRENT_TOKENS = CURRENT_TOKENS.filter((token) => {
+    if (!token.expiresAt) return true;
+    return new Date(token.expiresAt).getTime() > now;
+  });
+};
+
+const getActiveVersionResponse = () =>
+  CURRENT_ACTIVE_VERSION ? cloneVersion(CURRENT_ACTIVE_VERSION) : null;
+
+const getDraftVersionResponse = () =>
+  CURRENT_DRAFT_VERSION ? cloneVersion(CURRENT_DRAFT_VERSION) : null;
+
+const getVersionsResponse = () => CURRENT_HISTORY.map(cloneVersion);
+
+type GenerateTextParams = Parameters<typeof generateText>[0];
+type GenerateTextResult = Awaited<ReturnType<typeof generateText>>;
 
 interface Env {
   Chat: DurableObjectNamespace<Chat>;
   AI: Ai;
-  // Optional KV for persisting plans (will fall back to in-memory if not bound)
   CONFIG_KV?: KVNamespace;
   ConfigDO?: DurableObjectNamespace<ConfigDO>;
   ORIGIN_URL?: string;
@@ -161,7 +212,6 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/check-open-ai-key") {
-      // Repurposed: check for Workers AI binding presence instead of OpenAI key
       const hasWorkersAI = !!env.AI;
       return Response.json({
         success: hasWorkersAI
@@ -205,19 +255,16 @@ export default {
       }
     }
 
-    // Log if Workers AI binding is not configured
     if (!env.AI) {
       console.error(
         'Workers AI binding (AI) is not set. Ensure `wrangler.jsonc` contains { "ai": { "binding": "AI" } } and that types/env are generated.'
       );
     }
 
-    // Handle API routes first
     if (url.pathname.startsWith("/api/")) {
       return handleAPI(request, env);
     }
 
-    // Handle preview routes (lightweight live HUD)
     if (url.pathname.startsWith("/preview/")) {
       const route = url.searchParams.get("route") || "v1";
       const cache = url.searchParams.get("cache") || "HIT";
@@ -245,8 +292,8 @@ export default {
           <body>
             <div class="wrap">
               <h1>Preview Surface</h1>
-              <p>This page stands in for your origin during preview. Use the HUD to observe values.</p>
-              <p><small>Route a real origin later and proxy this Worker in front.</small></p>
+              <p>You are viewing the active edge plan for this preview token. The HUD shows the route, cache verdict, and request metrics so you can verify behaviour before shipping.</p>
+              <p><small>When this version is promoted the preview mirrors exactly what the Worker returns to browsers.</small></p>
             </div>
             <div class="hud">
               <div class="row"><span>Route:</span><span class="pill ${route === "v1" ? "ok" : "warn"}">${route.toUpperCase()}</span></div>
@@ -261,11 +308,10 @@ export default {
       );
     }
 
-    // Handle Durable Object routes (mock for deployment)
     if (url.pathname.startsWith("/do/")) {
       return Response.json({
-        message: "Durable Object routes are not available in this deployment",
-        status: "mock"
+        message: "Durable Object routes are handled via the /api endpoints",
+        status: "not_available"
       });
     }
 
@@ -286,6 +332,206 @@ async function handleAPI(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method.toUpperCase();
+  const hasConfigDO = Boolean(env.ConfigDO);
+
+  const forward = async (
+    target: string,
+    init?: RequestInit & { body?: string }
+  ) => forwardToConfigDO(env, target, init);
+
+  if (path.startsWith("/api/token/") && method === "DELETE") {
+    const token = path.split("/").pop() ?? "";
+    if (hasConfigDO) {
+      return forward(`/token/${token}`, { method: "DELETE" });
+    }
+    pruneExpiredTokens();
+    CURRENT_TOKENS = CURRENT_TOKENS.filter((entry) => entry.token !== token);
+    return Response.json({ token, deleted: true });
+  }
+
+  if (path === "/api/active" && method === "GET") {
+    if (hasConfigDO) return forward("/active");
+    ensureFallbackActive();
+    return Response.json({ active: getActiveVersionResponse() });
+  }
+
+  if (path === "/api/draft" && method === "GET") {
+    if (hasConfigDO) return forward("/draft");
+    return Response.json({ draft: getDraftVersionResponse() });
+  }
+
+  if (path === "/api/versions" && method === "GET") {
+    if (hasConfigDO) return forward("/versions");
+    ensureFallbackActive();
+    return Response.json({ versions: getVersionsResponse() });
+  }
+
+  if (path.startsWith("/api/versions/") && method === "GET") {
+    const versionId = path.split("/")[3];
+    if (hasConfigDO) return forward(`/versions/${versionId}`);
+    ensureFallbackActive();
+    const match = CURRENT_HISTORY.find((entry) => entry.id === versionId);
+    if (match) {
+      return Response.json({ version: cloneVersion(match) });
+    }
+    if (CURRENT_DRAFT_VERSION && CURRENT_DRAFT_VERSION.id === versionId) {
+      return Response.json({ version: getDraftVersionResponse() });
+    }
+    return Response.json({ message: "Version not found" }, { status: 404 });
+  }
+
+  if (path === "/api/plan" && method === "POST") {
+    if (hasConfigDO) {
+      const bodyText = await request.text();
+      return forward("/plan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyText
+      });
+    }
+    const payload = (await request.json()) as {
+      plan: EdgePlan;
+      description?: string;
+      promotedBy?: string;
+    };
+    await persistDraftPlan(env, payload.plan, payload.description);
+    if (CURRENT_DRAFT_VERSION && payload.promotedBy) {
+      CURRENT_DRAFT_VERSION = {
+        ...CURRENT_DRAFT_VERSION,
+        promotedBy: payload.promotedBy
+      };
+    }
+    return Response.json({
+      draft: getDraftVersionResponse(),
+      message: "Draft saved (fallback)"
+    });
+  }
+
+  if (path === "/api/promote" && method === "POST") {
+    if (hasConfigDO) {
+      const bodyText = await request.text();
+      return forward("/promote", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyText
+      });
+    }
+    const payload = (await request.json()) as {
+      versionId?: string;
+      promotedBy?: string;
+    };
+    ensureFallbackActive();
+    const candidate = payload.versionId
+      ? (CURRENT_HISTORY.find((entry) => entry.id === payload.versionId) ??
+        (CURRENT_DRAFT_VERSION && CURRENT_DRAFT_VERSION.id === payload.versionId
+          ? CURRENT_DRAFT_VERSION
+          : null))
+      : (CURRENT_DRAFT_VERSION ?? CURRENT_ACTIVE_VERSION);
+
+    if (!candidate) {
+      return Response.json({ error: "draft_not_found" }, { status: 404 });
+    }
+
+    const promoted = {
+      ...cloneVersion(candidate),
+      promotedAt: new Date().toISOString(),
+      promotedBy: payload.promotedBy ?? candidate.promotedBy
+    };
+
+    CURRENT_ACTIVE_VERSION = promoted;
+    CURRENT_PLAN = cloneRules(promoted.plan.rules);
+    recordHistory(promoted);
+    if (CURRENT_DRAFT_VERSION && CURRENT_DRAFT_VERSION.id === promoted.id) {
+      CURRENT_DRAFT_VERSION = null;
+    }
+
+    return Response.json({
+      active: promoted,
+      message: "Plan promoted (fallback)"
+    });
+  }
+
+  if (path === "/api/rollback" && method === "POST") {
+    if (hasConfigDO) {
+      const bodyText = await request.text();
+      return forward("/rollback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyText
+      });
+    }
+    const payload = (await request.json()) as {
+      versionId: string;
+      promotedBy?: string;
+    };
+    ensureFallbackActive();
+    const target = CURRENT_HISTORY.find(
+      (entry) => entry.id === payload.versionId
+    );
+    if (!target) {
+      return Response.json({ error: "version_not_found" }, { status: 404 });
+    }
+    const rolledBack = {
+      ...cloneVersion(target),
+      promotedAt: new Date().toISOString(),
+      promotedBy: payload.promotedBy ?? target.promotedBy
+    };
+    CURRENT_ACTIVE_VERSION = rolledBack;
+    CURRENT_PLAN = cloneRules(rolledBack.plan.rules);
+    recordHistory(rolledBack);
+    return Response.json({
+      active: rolledBack,
+      message: "Rollback complete (fallback)"
+    });
+  }
+
+  if (path === "/api/token" && method === "POST") {
+    if (hasConfigDO) {
+      const bodyText = await request.text();
+      return forward("/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyText
+      });
+    }
+    const payload = (await request.json()) as {
+      versionId?: string;
+      expiresInSeconds?: number;
+    };
+    ensureFallbackActive();
+    const targetId = payload.versionId ?? CURRENT_ACTIVE_VERSION?.id;
+    if (!targetId) {
+      return Response.json({ error: "version_not_found" }, { status: 404 });
+    }
+    const version =
+      CURRENT_HISTORY.find((entry) => entry.id === targetId) ??
+      (CURRENT_ACTIVE_VERSION && CURRENT_ACTIVE_VERSION.id === targetId
+        ? CURRENT_ACTIVE_VERSION
+        : null);
+    if (!version) {
+      return Response.json({ error: "version_not_found" }, { status: 404 });
+    }
+    const tokenState: PreviewTokenState = {
+      token: crypto.randomUUID(),
+      versionId: version.id,
+      createdAt: new Date().toISOString(),
+      expiresAt: payload.expiresInSeconds
+        ? new Date(Date.now() + payload.expiresInSeconds * 1000).toISOString()
+        : undefined
+    };
+    pruneExpiredTokens();
+    CURRENT_TOKENS = [
+      tokenState,
+      ...CURRENT_TOKENS.filter((entry) => entry.token !== tokenState.token)
+    ];
+    return Response.json({ token: tokenState });
+  }
+
+  if (path === "/api/tokens" && method === "GET") {
+    if (hasConfigDO) return forward("/tokens");
+    pruneExpiredTokens();
+    return Response.json({ tokens: CURRENT_TOKENS });
+  }
 
   if (path.startsWith("/api/token/")) {
     if (method === "DELETE") {
@@ -420,8 +666,6 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       scenario?: string;
     };
     const prompt = body.prompt || "";
-    // Scenario parameter available but not used in demo
-
     if (!prompt) {
       return new Response("Prompt is required", { status: 400 });
     }
@@ -429,28 +673,25 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
     if (!env.AI) {
       return new Response("Workers AI not configured", { status: 500 });
     }
-
-    // Guidance string used in fallback mode (built into the prompt below)
-
     const plan: CDNRule[] = [];
     const trace: ToolTraceEntry[] = [];
     const todos: TodoEntry[] = [];
     const notes: ResearchNote[] = [];
-
-    // Use Workers AI model with tool-calling via ai-sdk
     const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as keyof AiModels;
-    // Build the CDN-specific tool suite; each tool mutates the shared plan/trace/todo/note arrays.
     const cdnTools = createCDNTools(plan, trace, todos, notes);
-
-    // Utility wrapper so we record tool failures instead of throwing and losing context.
     const runTool = async <TArg, TResult>(
       label: string,
-      toolRef: { execute?: (args?: TArg) => Promise<TResult> } | undefined,
+      toolRef: unknown,
       args?: TArg
     ): Promise<TResult | null> => {
-      if (!toolRef?.execute) return null;
+      const maybeExecute = (toolRef as { execute?: unknown })?.execute;
+      if (typeof maybeExecute !== "function") return null;
       try {
-        return await toolRef.execute(args);
+        const executor = maybeExecute as (
+          input: TArg | undefined,
+          context?: unknown
+        ) => Promise<TResult>;
+        return await executor(args, undefined);
       } catch (error) {
         trace.push({
           id: crypto.randomUUID(),
@@ -472,48 +713,45 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       workersai as unknown as (m: string) => ReturnType<typeof workersai>
     )(model);
 
-    // Primary LLM pass: gather requirements, run tools, and produce a draft assistant reply.
-    let completion: any;
+    let completion: GenerateTextResult | undefined;
     try {
-      completion = await generateText({
+      const generationParams: GenerateTextParams = {
         system: `You are an AI edge configuration specialist. Hold a natural conversation and call tools to build, analyse, and polish a CDN plan.\n\nGuidance:\n- Confirm intent and missing parameters before invoking tools.\n- Use the rich toolset: cache/header/route/access/performance/image/rate-limit/bot/security, plus advanced rules (canary, banner, origin-shield, transform) and utilities (summarizePlan, scorePlanRisk, addTodoItem, validatePlan, dedupeRules).\n- Keep tool runs purposeful (<= 8 round-trips). Compose multiple tools per turn when assembling complex plans (e.g., canary + guardrail + banner).\n- Never describe or suggest raw tool JSON; execute the tool call instead.\n- Summarize the impact after tool execution and surface any warnings from validation/risk scoring.\n- Only add research notes or todo items when they help humans review the plan.\n- Stay within approved actions: no external proxy origins in v1, canary percentage <= 50%, and prefer guardrails for risky changes.`,
         model: modelFn,
         tools: cdnTools,
         toolChoice: "auto",
         messages: [{ role: "user", content: prompt }],
-        maxToolRoundtrips: 24,
-        maxTokens: 800,
         temperature: 0.2,
         stopWhen: stepCountIs(20)
-      } as any);
+      };
+      completion = await generateText(generationParams);
     } catch (e) {
       console.warn("tool-generation failed, falling back to JSON mode", e);
     }
 
-    // If tool plan is empty, fall back to JSON-output mode and parse
     if (plan.length === 0) {
       try {
-        // Fallback generation: ask for raw JSON and repair the output into our rule schema.
-        const jsonSystem =
-          `You are a CDN configuration generator. Output ONLY a JSON array of rule objects. Each object must include a \"type\" field with values from: \n` +
-          `"cache", "header", "route", "access", "performance", "image", "rate-limit", "bot-protection", "geo-routing", "security", "canary", "banner", "origin-shield", "transform".\n` +
-          `Fields per type:\n` +
-          `- cache: path (string glob), ttl (number, seconds), description?\n` +
-          `- header: action ("add"|"remove"|"modify"), name (string), value?, description?\n` +
-          `- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description?\n` +
-          `- access: allow (string[]), deny (string[]), description?\n` +
-          `- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description?\n` +
-          `- image: path (string), quality? (1-100), format? ("auto"|"webp"|"avif"|"jpeg"), width?, height?, description?\n` +
-          `- rate-limit: path (string), requestsPerMinute (number), burst?, action ("block"|"challenge"|"delay"|"log"), description?\n` +
-          `- bot-protection: mode ("off"|"js-challenge"|"managed-challenge"|"block"), sensitivity?, description?\n` +
-          `- geo-routing: from (string), toEU?, toUS?, toAPAC?, fallback?, description?\n` +
-          `- security: csp?, hstsMaxAge?, xfo?, referrerPolicy?, permissionsPolicy?, description?\n` +
-          `- canary: path (string), primaryOrigin (string), canaryOrigin (string), percentage (0-0.5), stickyBy? ("cookie"|"header"|"ip"|"session"), metricGuardrail? ({ metric: "latency"|"error_rate"|"cache_hit", operator: "lt"|"gt"|"lte"|"gte", threshold: number }), description?\n` +
-          `- banner: path (string), message (string), style? ({ tone?: string, theme?: string }), schedule? ({ start?: string, end?: string, timezone?: string }), audience? ({ segment?: string, geo?: string[] }), description?\n` +
-          `- origin-shield: origins (string[]), tieredCaching? ("smart"|"regional"|"off"), healthcheck? ({ path: string, intervalSeconds?: number, timeoutMs?: number }), description?\n` +
-          `- transform: path (string), phase ("request"|"response"), action ({ kind: "header"|"html-inject"|"rewrite-url", ... }), description?\n` +
-          `Return a compact JSON array. Do not include any explanation or markdown.\n` +
-          `Wrap the JSON array between <JSON> and </JSON> tags and output nothing else.`;
+        const jsonSystem = [
+          'You are a CDN configuration generator. Output ONLY a JSON array of rule objects. Each object must include a "type" field with values from:',
+          '"cache", "header", "route", "access", "performance", "image", "rate-limit", "bot-protection", "geo-routing", "security", "canary", "banner", "origin-shield", "transform".',
+          "Fields per type:",
+          "- cache: path (string glob), ttl (number, seconds), description?",
+          '- header: action ("add"|"remove"|"modify"), name (string), value?, description?',
+          '- route: from (string), to (string), ruleType ("redirect"|"rewrite"|"proxy"), description?',
+          "- access: allow (string[]), deny (string[]), description?",
+          '- performance: optimization ("compression"|"minification"|"image-optimization"|"lazy-loading"), enabled (boolean), description?',
+          '- image: path (string), quality? (1-100), format? ("auto"|"webp"|"avif"|"jpeg"), width?, height?, description?',
+          '- rate-limit: path (string), requestsPerMinute (number), burst?, action ("block"|"challenge"|"delay"|"log"), description?',
+          '- bot-protection: mode ("off"|"js-challenge"|"managed-challenge"|"block"), sensitivity?, description?',
+          "- geo-routing: from (string), toEU?, toUS?, toAPAC?, fallback?, description?",
+          "- security: csp?, hstsMaxAge?, xfo?, referrerPolicy?, permissionsPolicy?, description?",
+          '- canary: path (string), primaryOrigin (string), canaryOrigin (string), percentage (0-0.5), stickyBy? ("cookie"|"header"|"ip"|"session"), metricGuardrail? ({ metric: "latency"|"error_rate"|"cache_hit", operator: "lt"|"gt"|"lte"|"gte", threshold: number }), description?',
+          "- banner: path (string), message (string), style? ({ tone?: string, theme?: string }), schedule? ({ start?: string, end?: string, timezone?: string }), audience? ({ segment?: string, geo?: string[] }), description?",
+          '- origin-shield: origins (string[]), tieredCaching? ("smart"|"regional"|"off"), healthcheck? ({ path: string, intervalSeconds?: number, timeoutMs?: number }), description?',
+          '- transform: path (string), phase ("request"|"response"), action ({ kind: "header"|"html-inject"|"rewrite-url", ... }), description?',
+          "Return a compact JSON array. Do not include any explanation or markdown.",
+          "Wrap the JSON array between <JSON> and </JSON> tags and output nothing else."
+        ].join("\n");
 
         const rawResponse = await env.AI.run(model, {
           prompt: `SYSTEM:\n${jsonSystem}\n\nUSER:\nGenerate CDN rules for: ${prompt}`,
@@ -521,85 +759,107 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
           temperature: 0.2
         } as never);
 
-        let raw =
-          (rawResponse as any)?.output?.[0]?.text ??
-          (rawResponse as any)?.output_text ??
-          (typeof rawResponse === "string"
-            ? rawResponse
-            : JSON.stringify(rawResponse));
+        const extractRawText = (response: unknown): string => {
+          if (typeof response === "string") {
+            return response;
+          }
+          if (typeof response !== "object" || response === null) {
+            return JSON.stringify(response);
+          }
+          const structured = response as {
+            output?: Array<{ text?: string }>;
+            output_text?: string;
+            text?: string;
+          };
+          if (Array.isArray(structured.output)) {
+            const firstWithText = structured.output.find(
+              (entry) => typeof entry?.text === "string"
+            );
+            if (firstWithText?.text) return firstWithText.text;
+          }
+          if (typeof structured.output_text === "string") {
+            return structured.output_text;
+          }
+          if (typeof structured.text === "string") {
+            return structured.text;
+          }
+          return JSON.stringify(response);
+        };
 
-        // Try to unescape if the model returned a stringified array (with escaped newlines/quotes)
-        const tryUnescape = (s: string): string => {
-          const t = s.trim();
-          if (/^"[\s\S]*"$/.test(t)) {
+        let raw = extractRawText(rawResponse);
+
+        const tryUnescape = (value: string): string => {
+          const trimmed = value.trim();
+          if (/^"[\s\S]*"$/.test(trimmed)) {
             try {
-              return JSON.parse(t) as string;
+              return JSON.parse(trimmed) as string;
             } catch {
-              return s;
+              return value;
             }
           }
-          return s;
+          return value;
         };
         if (typeof raw === "string") raw = tryUnescape(raw);
 
         let arraySource: string | null = null;
         if (typeof raw === "string") {
           const tag = raw.match(/<JSON>([\s\S]*?)<\/JSON>/);
-          if (tag && tag[1]) {
+          if (tag?.[1]) {
             arraySource = tag[1].trim();
           } else {
             const bracket = raw.match(/\[[\s\S]*\]/);
-            if (bracket && bracket[0]) arraySource = bracket[0];
+            if (bracket?.[0]) arraySource = bracket[0];
             else {
-              // Last resort: remove escaping and try again
-              const un = raw
+              const unescaped = raw
                 .replace(/\\n/g, "\n")
                 .replace(/\\t/g, "\t")
                 .replace(/\\r/g, "\r");
-              const br2 = un.match(/\[[\s\S]*\]/);
-              if (br2 && br2[0]) arraySource = br2[0];
+              const br2 = unescaped.match(/\[[\s\S]*\]/);
+              if (br2?.[0]) arraySource = br2[0];
             }
           }
         }
 
         if (arraySource) {
-          // Unwrap quoted array if needed (e.g., "\n[ ... ]")
           let src = arraySource.trim();
           if (/^"[\s\S]*"$/.test(src)) {
+            const snapshot = src;
             try {
-              src = JSON.parse(src) as string;
-            } catch {}
+              src = JSON.parse(snapshot) as string;
+            } catch {
+              src = snapshot;
+            }
           }
 
-          // Normalize common quasi-JSON patterns from models
-          const normalizeToJson = (s: string): string => {
-            let t = s.trim();
-            // Remove leading JSON escape sequences like \n, \t
-            t = t.replace(/^(\\[nrt])+/, "");
-            // If fenced, strip code fences
-            t = t.replace(/^```[\w-]*\n([\s\S]*?)\n```$/m, "$1");
-            // Replace single-quoted strings with double quotes
-            t = t.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
-            // Quote unquoted object keys
-            t = t.replace(/([\{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g, '$1"$2"$3');
-            // Remove trailing commas
-            t = t.replace(/,(\s*[\]\}])/g, "$1");
-            // Collapse any stray JSON escapes
-            t = t
+          const normalizeToJson = (input: string): string => {
+            let candidate = input.trim();
+            candidate = candidate.replace(/^(\\[nrt])+/, "");
+            candidate = candidate.replace(
+              /^```[\w-]*\n([\s\S]*?)\n```$/m,
+              "$1"
+            );
+            candidate = candidate.replace(
+              /'([^'\\]*(?:\\.[^'\\]*)*)'/g,
+              '"$1"'
+            );
+            candidate = candidate.replace(
+              /([{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g,
+              '$1"$2"$3'
+            );
+            candidate = candidate.replace(/,(\s*[\]}])/g, "$1");
+            return candidate
               .replace(/\\n/g, "\n")
               .replace(/\\t/g, "\t")
               .replace(/\\r/g, "\r");
-            return t;
           };
 
-          let jsonText = normalizeToJson(src);
+          const jsonText = normalizeToJson(src);
           let parsed: unknown;
           try {
             parsed = JSON.parse(jsonText);
           } catch {
-            // As a last resort, try re-extracting the first bracketed array after normalization
             const br = jsonText.match(/\[[\s\S]*\]/);
-            if (br && br[0]) {
+            if (br?.[0]) {
               try {
                 parsed = JSON.parse(br[0]);
               } catch {
@@ -645,23 +905,10 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
     let riskAuditText: string | null = null;
 
     if (plan.length > 0) {
-      // Deterministic post-processing ensures the UI receives structured diagnostics every time.
-      await runTool("dedupeRules", cdnTools.dedupeRules, {} as any);
-      validationResult = await runTool(
-        "validatePlan",
-        cdnTools.validatePlan,
-        {} as any
-      );
-      summaryResult = await runTool(
-        "summarizePlan",
-        cdnTools.summarizePlan,
-        undefined as any
-      );
-      riskResult = await runTool(
-        "scorePlanRisk",
-        cdnTools.scorePlanRisk,
-        {} as any
-      );
+      await runTool("dedupeRules", cdnTools.dedupeRules);
+      validationResult = await runTool("validatePlan", cdnTools.validatePlan);
+      summaryResult = await runTool("summarizePlan", cdnTools.summarizePlan);
+      riskResult = await runTool("scorePlanRisk", cdnTools.scorePlanRisk);
 
       const todoTexts = new Set(todos.map((t) => t.text.toLowerCase()));
       const ensureTodo = async (text: string) => {
@@ -670,7 +917,7 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
         await runTool("addTodoItem", cdnTools.addTodoItem, {
           text,
           status: "pending"
-        } as any);
+        });
         todoTexts.add(key);
       };
 
@@ -689,21 +936,52 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
         );
       }
       try {
-        // Secondary LLM call: produce a narrative risk audit, separate from the deterministic score.
-        const auditPrompt = `You are reviewing a proposed CDN configuration. Analyze risk from 0 (trivial) to 100 (catastrophic). Consider canary percentages, missing guardrails, rewrites, origin shielding, permissive access, runtime transforms, banners without end dates, and total change volume. Respond with a short heading, then a line \"Score: <number>\", followed by 3-5 bullet-style sentences explaining the risk.\n\nRules:\n${JSON.stringify(plan, null, 2)}`;
-        const auditResponse = await generateText({
+        const auditPrompt = `You are reviewing a proposed CDN configuration. Analyze risk from 0 (trivial) to 100 (catastrophic). Consider canary percentages, missing guardrails, rewrites, origin shielding, permissive access, runtime transforms, banners without end dates, and total change volume. Respond with a short heading, then a line "Score: <number>", followed by 3-5 bullet-style sentences explaining the risk.\n\nRules:\n${JSON.stringify(plan, null, 2)}`;
+        const auditParams: GenerateTextParams = {
           system:
             "You are a senior edge reliability engineer performing a production readiness review.",
           model: modelFn,
           messages: [{ role: "user", content: auditPrompt }],
-          maxTokens: 400,
           temperature: 0
-        } as any);
+        };
+        const auditResponse = await generateText(auditParams);
         if (typeof auditResponse?.text === "string") {
           riskAuditText = auditResponse.text.trim();
         }
       } catch (auditError) {
         console.warn("risk audit failed", auditError);
+      }
+
+      if (riskAuditText) {
+        const scoreMatch = riskAuditText.match(/Score:\s*(\d{1,3})/i);
+        if (scoreMatch) {
+          const parsedScore = Math.min(100, Math.max(0, Number(scoreMatch[1])));
+          const classification =
+            parsedScore <= 30
+              ? "low"
+              : parsedScore <= 60
+                ? "moderate"
+                : parsedScore <= 80
+                  ? "elevated"
+                  : "high";
+          const parsedReasons = riskResult?.reasons?.length
+            ? riskResult.reasons
+            : riskAuditText
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => /^[-•]/.test(line))
+                .map((line) => line.replace(/^[-•]\s*/, ""));
+          riskResult = {
+            score: parsedScore,
+            classification,
+            reasons: parsedReasons
+          };
+          if (parsedScore >= 60) {
+            await ensureTodo(
+              `Review plan risk (${classification}, score ${parsedScore}).`
+            );
+          }
+        }
       }
     }
 
@@ -735,10 +1013,17 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       }
     }
 
-    const completionText =
-      typeof (completion as any)?.text === "string"
-        ? (completion as any).text.trim()
-        : "";
+    const completionText = (() => {
+      if (
+        completion &&
+        typeof completion === "object" &&
+        "text" in completion &&
+        typeof (completion as { text?: unknown }).text === "string"
+      ) {
+        return (completion as { text: string }).text.trim();
+      }
+      return "";
+    })();
     let assistantMessage = completionText;
     const insightsSummary = assistantInsights.join("\n");
     if (insightsSummary) {
@@ -775,7 +1060,6 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
       riskAudit: riskAuditText
     };
 
-    // The executed tools or fallback have appended rules into 'plan'.
     return Response.json({
       config: plan,
       trace,
@@ -797,8 +1081,7 @@ async function generateConfig(request: Request, env: Env): Promise<Response> {
 /**
  * Validate a CDN configuration
  */
-function validateConfig(configData: { config?: any }): Response {
-  // Basic validation - in a real app this would use Zod schemas
+function validateConfig(configData: { config?: unknown }): Response {
   const config = configData.config || [];
   const isValid = Array.isArray(config);
 
@@ -815,13 +1098,11 @@ function validateConfig(configData: { config?: any }): Response {
  * Simulate CDN configuration performance
  */
 function simulateConfig(simData: {
-  config?: any;
+  config?: unknown;
   requestCount?: number;
 }): Response {
-  // Config parameter available but not used in demo
   const requestCount = simData.requestCount || 100;
 
-  // Mock simulation results
   const metrics = {
     responseTime: 80 + Math.random() * 40,
     cacheHitRate: 0.7 + Math.random() * 0.3,
@@ -864,7 +1145,18 @@ async function saveConfig(
   if (env.CONFIG_KV) {
     await env.CONFIG_KV.put("current_plan", JSON.stringify(cfg));
   } else {
-    CURRENT_PLAN = cfg;
+    ensureFallbackActive();
+    CURRENT_PLAN = cloneRules(cfg);
+    if (CURRENT_ACTIVE_VERSION) {
+      CURRENT_ACTIVE_VERSION = {
+        ...CURRENT_ACTIVE_VERSION,
+        plan: {
+          ...CURRENT_ACTIVE_VERSION.plan,
+          rules: cloneRules(cfg)
+        }
+      };
+      recordHistory(CURRENT_ACTIVE_VERSION);
+    }
   }
   return Response.json({ saved: true, count: cfg.length });
 }
@@ -902,12 +1194,21 @@ async function persistDraftPlan(
     }
     return null;
   } else {
-    CURRENT_PLAN = plan.rules;
-    if (env.CONFIG_KV) {
-      await env.CONFIG_KV.put("current_plan", JSON.stringify(plan.rules));
-    }
+    ensureFallbackActive();
+    const draftPlan: EdgePlan = {
+      ...plan,
+      id: plan.id || crypto.randomUUID(),
+      createdAt: plan.createdAt ?? new Date().toISOString(),
+      rules: cloneRules(plan.rules)
+    };
+    const draftVersion: EdgePlanVersion = {
+      id: draftPlan.id,
+      plan: draftPlan,
+      description
+    };
+    CURRENT_DRAFT_VERSION = draftVersion;
+    return draftVersion.id;
   }
-  return null;
 }
 
 async function fetchActivePlan(
@@ -925,13 +1226,13 @@ async function fetchActivePlan(
     }
   }
 
-  if (CURRENT_PLAN.length === 0) return null;
+  ensureFallbackActive();
+  if (!CURRENT_ACTIVE_VERSION) return null;
+  const activeClone = cloneVersion(CURRENT_ACTIVE_VERSION);
+  CURRENT_PLAN = cloneRules(activeClone.plan.rules);
   return {
-    plan: {
-      id: "in-memory",
-      rules: CURRENT_PLAN,
-      createdAt: new Date().toISOString()
-    }
+    plan: activeClone.plan,
+    versionId: activeClone.id
   };
 }
 
@@ -1074,8 +1375,12 @@ async function applyEdgeRuntime(
 
   if (!env.ORIGIN_URL) {
     const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
-    headersToRemove.forEach((header) => headers.delete(header));
-    headersToSet.forEach(({ name, value }) => headers.set(name, value));
+    headersToRemove.forEach((header) => {
+      headers.delete(header);
+    });
+    headersToSet.forEach(({ name, value }) => {
+      headers.set(name, value);
+    });
     headers.set("X-Edge-Composer-Version", active.versionId ?? "in-memory");
     headers.set("X-Edge-Composer-Route", selectedRouteLabel);
     if (matchedRules.length) {
@@ -1084,7 +1389,7 @@ async function applyEdgeRuntime(
         matchedRules.map((r) => r.type).join(",")
       );
     }
-    const html = `<!doctype html><html><head><meta charset="utf-8" /><title>EdgeComposer Preview</title></head><body style="font-family:system-ui;background:#0f1729;color:#f8fafc;padding:32px;"><h1>Edge Composer Placeholder</h1><p>No origin is configured. Set <code>ORIGIN_URL</code> to proxy a real backend.</p><pre style="background:rgba(15,23,42,0.9);padding:16px;border-radius:8px;">${JSON.stringify({ pathname: url.pathname, matchedRules }, null, 2)}</pre></body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8" /><title>Edge Composer Preview</title></head><body style="font-family:system-ui;background:#0f1729;color:#f8fafc;padding:32px;"><h1>Edge Composer Preview</h1><p>This response is rendered by the edge plan so you can confirm which rules matched for <code>${url.pathname}</code>.</p><p><small>Set an <code>ORIGIN_URL</code> when you are ready to proxy your upstream; the HUD and headers already reflect the active configuration.</small></p><pre style="background:rgba(15,23,42,0.9);padding:16px;border-radius:8px;">${JSON.stringify({ pathname: url.pathname, matchedRules }, null, 2)}</pre></body></html>`;
     const payload = bannerRule ? injectBanner(html, bannerRule) : html;
     return new Response(payload, { status: 200, headers });
   }
@@ -1106,8 +1411,12 @@ async function applyEdgeRuntime(
 
   const originResponse = await fetch(originUrlString, fetchInit);
   const responseHeaders = new Headers(originResponse.headers);
-  headersToRemove.forEach((header) => responseHeaders.delete(header));
-  headersToSet.forEach(({ name, value }) => responseHeaders.set(name, value));
+  headersToRemove.forEach((header) => {
+    responseHeaders.delete(header);
+  });
+  headersToSet.forEach(({ name, value }) => {
+    responseHeaders.set(name, value);
+  });
   responseHeaders.set(
     "X-Edge-Composer-Version",
     active.versionId ?? "in-memory"
@@ -1139,7 +1448,12 @@ async function applyEdgeRuntime(
 }
 
 function matchesRulePath(rule: CDNRule, pathname: string): boolean {
-  const pattern = (rule as any).path ?? (rule as any).from ?? "*";
+  const pattern =
+    "path" in rule && typeof (rule as { path?: unknown }).path === "string"
+      ? (rule as { path: string }).path
+      : "from" in rule && typeof (rule as { from?: unknown }).from === "string"
+        ? (rule as { from: string }).from
+        : "*";
   if (!pattern) return true;
   const escaped = pattern
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")

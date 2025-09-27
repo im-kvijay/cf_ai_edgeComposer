@@ -7,6 +7,8 @@ import type {
   CDNRule
 } from "@/shared-types";
 
+type DurableState = ConstructorParameters<typeof DurableObject>[0];
+
 const VERSION_PREFIX = "version:" as const;
 const TOKEN_PREFIX = "token:" as const;
 const ACTIVE_KEY = "active" as const;
@@ -35,6 +37,13 @@ interface CreateTokenRequest {
 }
 
 export class ConfigDO extends DurableObject {
+  private readonly state: DurableState;
+
+  constructor(state: DurableState, env: Env) {
+    super(state, env);
+    this.state = state;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "");
@@ -395,4 +404,3 @@ export class ConfigDO extends DurableObject {
     );
   }
 }
-
