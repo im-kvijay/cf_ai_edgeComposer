@@ -1,5 +1,6 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's alright */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { Button } from "@/components/button/Button";
 import { Textarea } from "@/components/textarea/Textarea";
 import { Loader } from "@/components/loader/Loader";
@@ -36,8 +37,10 @@ import {
   Play,
   CheckCircle,
   ArrowRight,
-  ArrowClockwise
+  ArrowClockwise,
+  Gear
 } from "@phosphor-icons/react";
+import { SettingsPanel } from "@/components/settings/SettingsPanel";
 
 export default function CDNConfigurator() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -79,6 +82,12 @@ export default function CDNConfigurator() {
       expiresAt?: string;
     }>
   >([]);
+  const [originOverride, setOriginOverride] = useState<string | null>(null);
+  const [originInput, setOriginInput] = useState("");
+  const [isSavingOrigin, setIsSavingOrigin] = useState(false);
+  const [isLoadingOrigin, setIsLoadingOrigin] = useState(true);
+  const [originError, setOriginError] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCreatingToken, setIsCreatingToken] = useState(false);
   const refreshVersions = useCallback(async () => {
     try {
@@ -118,6 +127,36 @@ export default function CDNConfigurator() {
       }
     } catch (err) {
       console.error("load tokens failed", err);
+    }
+  }, []);
+
+  const submitOriginOverride = useCallback(async (value: string | null) => {
+    setIsSavingOrigin(true);
+    setOriginError(null);
+    try {
+      const trimmed = value && value.trim().length > 0 ? value.trim() : null;
+      const res = await fetch("/api/origin", {
+        method: trimmed ? "POST" : "DELETE",
+        headers: trimmed ? { "Content-Type": "application/json" } : undefined,
+        body: trimmed ? JSON.stringify({ origin: trimmed }) : undefined
+      });
+      if (!res.ok) {
+        throw new Error(`origin update failed: ${res.status}`);
+      }
+      const data = (await res.json()) as { origin?: string | null };
+      const origin =
+        typeof data.origin === "string" && data.origin.trim().length > 0
+          ? data.origin.trim()
+          : null;
+      setOriginOverride(origin);
+      setOriginInput(origin ?? "");
+      return true;
+    } catch (err) {
+      console.error("origin update failed", err);
+      setOriginError("Unable to update preview origin.");
+      return false;
+    } finally {
+      setIsSavingOrigin(false);
     }
   }, []);
 
@@ -474,6 +513,27 @@ export default function CDNConfigurator() {
   }, [refreshVersions, refreshTokens]);
 
   useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/origin");
+        if (res.ok) {
+          const data = (await res.json()) as { origin?: string | null };
+          const origin =
+            typeof data.origin === "string" && data.origin.trim().length > 0
+              ? data.origin.trim()
+              : null;
+          setOriginOverride(origin);
+          setOriginInput(origin ?? "");
+        }
+      } catch (err) {
+        console.error("load origin failed", err);
+      } finally {
+        setIsLoadingOrigin(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     if (theme === "dark") {
       document.documentElement.classList.add("dark");
       document.documentElement.classList.remove("light");
@@ -489,9 +549,31 @@ export default function CDNConfigurator() {
   };
 
   const [input, setInput] = useState("");
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleInputChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
   };
+
+  const handleOriginSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const ok = await submitOriginOverride(originInput);
+      if (ok) setIsSettingsOpen(false);
+    },
+    [originInput, submitOriginOverride]
+  );
+
+  const handleOriginClear = useCallback(async () => {
+    setOriginInput("");
+    const ok = await submitOriginOverride(null);
+    if (ok) setIsSettingsOpen(false);
+  }, [submitOriginOverride]);
+
+  const handleOriginInputChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      setOriginInput(event.target.value);
+    },
+    []
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -805,381 +887,178 @@ export default function CDNConfigurator() {
   }, [activeRuleIndex, currentPlan.rules]);
 
   return (
-    <div className="h-screen w-full flex bg-neutral-50 dark:bg-neutral-900">
-      {/* Left Pane - Chat & Configuration */}
-      <div className="flex-1 flex flex-col border-r border-neutral-200 dark:border-neutral-800">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center justify-center h-8 w-8 bg-blue-600 rounded-lg">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="white"
-                  role="img"
-                  aria-labelledby="app-logo-title"
-                >
-                  <title id="app-logo-title">Edge Composer Logo</title>
-                  <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-                </svg>
-              </div>
-              <div>
-                <h1 className="font-semibold text-lg text-neutral-900 dark:text-neutral-100">
-                  CDN Configurator
-                </h1>
-                <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                  AI-powered CDN optimization
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={toggleTheme}>
-                {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-              </Button>
-            </div>
-          </div>
-        </div>
-        <ChatView
-          messages={messages}
-          todos={todos}
-          notes={notes}
-          renderToolMessage={renderToolMessage}
-        />
-
-        {/* Chat Input */}
-        <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <div className="flex gap-2">
-              <div className="flex-1">
-                <Textarea
-                  placeholder="Describe your CDN optimization needs... (e.g., 'Cache images for 24 hours and optimize for mobile')"
-                  className="min-h-[80px] resize-none border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900"
-                  value={input}
-                  onChange={handleInputChange}
-                  disabled={isGenerating}
-                />
-              </div>
-              <Button
-                type="submit"
-                size="lg"
-                className={`px-6 ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
-                disabled={!input.trim() || isGenerating}
-              >
-                {isGenerating ? (
-                  <span className="flex items-center gap-2">
-                    <Loader /> Generating...
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-2">
-                    <Play size={18} /> Generate
-                  </span>
-                )}
-              </Button>
-            </div>
-            <div className="flex items-center justify-between text-sm text-neutral-600 dark:text-neutral-400">
-              <span>
-                Use natural language to describe your CDN configuration
-              </span>
-              <div className="flex items-center gap-2">
-                {proposedPlan ? (
-                  <>
-                    <Button
-                      size="sm"
-                      onClick={simulatePlan}
-                      className="text-blue-600 border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20"
-                      disabled={isGenerating}
-                    >
-                      Simulate
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={applyChanges}
-                      className="text-green-600 border-green-600 hover:bg-green-50 dark:hover:bg-green-900/20"
-                      disabled={isGenerating || !draftVersionId}
-                    >
-                      <CheckCircle size={16} className="mr-1" />
-                      Apply
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={exportRules}
-                      className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
-                      disabled={isGenerating}
-                    >
-                      Export
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={revertChanges}
-                      className="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
-                      disabled={isGenerating}
-                    >
-                      <ArrowClockwise size={16} className="mr-1" />
-                      Revert
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={rollbackLatest}
-                      className="text-red-600 border-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-                      disabled={isGenerating || availableVersions.length < 2}
-                    >
-                      Rollback
-                    </Button>
-                  </>
-                ) : null}
-                <Button
-                  size="sm"
-                  onClick={exportRules}
-                  className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
-                  disabled={isGenerating}
-                >
-                  Export
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={createPreviewToken}
-                  className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
-                  disabled={isGenerating || !activeVersionId || isCreatingToken}
-                >
-                  {isCreatingToken ? "Creating..." : "Preview Token"}
-                </Button>
-              </div>
-            </div>
-          </form>
-        </div>
-
-        {/* Configuration Display */}
-        <div className="flex-1 p-6 overflow-auto">
-          {proposedPlan ? (
-            <div className="space-y-4">
-              <h3 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
-                Proposed Changes
-              </h3>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                  <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                    Active Version
-                  </div>
-                  <div className="font-mono text-neutral-800 dark:text-neutral-200 text-xs">
-                    {activeVersionId ?? "none"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                  <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                    Draft Version
-                  </div>
-                  <div className="font-mono text-neutral-800 dark:text-neutral-200 text-xs">
-                    {draftVersionId ?? "none"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                  <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                    Versions Stored
-                  </div>
-                  <div className="text-neutral-800 dark:text-neutral-200">
-                    {availableVersions.length}
-                  </div>
-                </div>
-              </div>
-
-              {planInsights && (
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                      Summary
-                    </div>
-                    <p className="text-neutral-700 dark:text-neutral-200 whitespace-pre-wrap">
-                      {planInsights.summary &&
-                      planInsights.summary.trim().length > 0
-                        ? planInsights.summary
-                        : "Plan generated. Review the proposed configuration below."}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                      Validation
-                    </div>
-                    {validationErrors.length === 0 &&
-                    validationWarnings.length === 0 ? (
-                      <div className="text-neutral-700 dark:text-neutral-200">
-                        No validation issues detected.
-                      </div>
-                    ) : (
-                      <ul className="space-y-1">
-                        {validationWarnings.map((warn) => (
-                          <li
-                            key={warn}
-                            className="text-amber-600 dark:text-amber-300"
-                          >
-                            Warning: {warn}
-                          </li>
-                        ))}
-                        {validationErrors.map((err) => (
-                          <li
-                            key={err}
-                            className="text-red-600 dark:text-red-300"
-                          >
-                            Error: {err}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
-                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
-                      Risk
-                    </div>
-                    <div className={`text-lg font-semibold ${riskTone}`}>
-                      {riskLevel ? riskLevel.toUpperCase() : "NOT SCORED"}
-                    </div>
-                    {typeof riskScore === "number" ? (
-                      <div className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
-                        Score {riskScore}/100
-                      </div>
-                    ) : (
-                      <div className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
-                        No risk score available.
-                      </div>
-                    )}
-                    {riskReasons.length > 0 && (
-                      <ul className="mt-2 space-y-1 text-xs text-neutral-600 dark:text-neutral-400">
-                        {riskReasons.map((reason) => (
-                          <li key={reason}>- {reason}</li>
-                        ))}
-                      </ul>
-                    )}
-                    {riskAudit && (
-                      <details className="mt-2 text-xs text-neutral-600 dark:text-neutral-400">
-                        <summary className="cursor-pointer text-neutral-500 dark:text-neutral-300">
-                          View audit notes
-                        </summary>
-                        <div className="mt-2 whitespace-pre-wrap bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded">
-                          {riskAudit}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Diff Display */}
-              <div className="space-y-3">
-                <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
-                  Current Configuration
-                </div>
-                {currentPlan.rules.map((rule, index) => {
-                  const rulePath = extractRulePath(rule);
-                  const itemKey =
-                    rule.id ??
-                    `${rule.type}-${rulePath ?? rule.description ?? index}`;
-                  return (
-                    <div
-                      key={itemKey}
-                      className="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-lg"
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-mono bg-neutral-200 dark:bg-neutral-700 px-2 py-1 rounded">
-                          {rule.type}
-                        </span>
-                        {rulePath && (
-                          <span className="text-xs font-mono text-blue-600 dark:text-blue-400">
-                            {rulePath}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-sm text-neutral-700 dark:text-neutral-300">
-                        {rule.description}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <div className="flex items-center gap-2 my-4">
-                  <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-600"></div>
-                  <ArrowRight size={16} className="text-neutral-400" />
-                  <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-600"></div>
-                </div>
-
-                <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
-                  Proposed Configuration
-                </div>
-                {proposedPlan.rules.map((rule, index) => {
-                  const rulePath = extractRulePath(rule);
-                  const itemKey =
-                    rule.id ??
-                    `${rule.type}-${rulePath ?? rule.description ?? index}`;
-                  return (
-                    <div
-                      key={itemKey}
-                      className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-3 rounded-lg"
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-mono bg-green-200 dark:bg-green-700 px-2 py-1 rounded">
-                          {rule.type}
-                        </span>
-                        {rulePath && (
-                          <span className="text-xs font-mono text-green-600 dark:text-green-400">
-                            {rulePath}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-sm text-green-700 dark:text-green-300">
-                        {rule.description}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center space-y-4 max-w-md">
-                <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto">
+    <>
+      <div className="h-screen w-full flex bg-neutral-50 dark:bg-neutral-900">
+        {/* Left Pane - Chat & Configuration */}
+        <div className="flex-1 flex flex-col border-r border-neutral-200 dark:border-neutral-800">
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center h-8 w-8 bg-blue-600 rounded-lg">
                   <svg
-                    width="32"
-                    height="32"
+                    width="20"
+                    height="20"
                     viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className="text-blue-600 dark:text-blue-400"
+                    fill="white"
                     role="img"
-                    aria-labelledby="empty-state-icon-title"
+                    aria-labelledby="app-logo-title"
                   >
-                    <title id="empty-state-icon-title">
-                      Edge Composer Placeholder Icon
-                    </title>
+                    <title id="app-logo-title">Edge Composer Logo</title>
                     <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
                   </svg>
                 </div>
-                <h3 className="font-medium text-neutral-900 dark:text-neutral-100">
-                  Ready to Optimize
-                </h3>
-                <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                  Describe your CDN optimization needs in natural language
-                  above. The AI will generate a configuration plan with
-                  performance improvements.
-                </p>
-                <div className="text-xs text-neutral-500 dark:text-neutral-500 space-y-1">
-                  <div>
-                    Try: "Cache images for 24 hours and add security headers"
-                  </div>
-                  <div>
-                    Or: "Optimize for e-commerce with fast product loading"
-                  </div>
+                <div>
+                  <h1 className="font-semibold text-lg text-neutral-900 dark:text-neutral-100">
+                    CDN Configurator
+                  </h1>
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                    AI-powered CDN optimization
+                  </p>
                 </div>
               </div>
-            </div>
-          )}
 
-          {previewTokens.length > 0 && (
-            <div className="mt-6">
-              <h4 className="font-medium text-neutral-900 dark:text-neutral-100 mb-2">
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setIsSettingsOpen(true)}
+                  tooltip="Open settings"
+                >
+                  <Gear size={18} />
+                </Button>
+                <Button size="sm" onClick={toggleTheme}>
+                  {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+                </Button>
+              </div>
+            </div>
+          </div>
+          <ChatView
+            messages={messages}
+            todos={todos}
+            notes={notes}
+            renderToolMessage={renderToolMessage}
+          />
+
+          {/* Chat Input */}
+          <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Textarea
+                    placeholder="Describe your CDN optimization needs... (e.g., 'Cache images for 24 hours and optimize for mobile')"
+                    className="min-h-[80px] resize-none border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900"
+                    value={input}
+                    onChange={handleInputChange}
+                    disabled={isGenerating}
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  size="lg"
+                  className={`px-6 ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
+                  disabled={!input.trim() || isGenerating}
+                >
+                  {isGenerating ? (
+                    <span className="flex items-center gap-2">
+                      <Loader /> Generating...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-2">
+                      <Play size={18} /> Generate
+                    </span>
+                  )}
+                </Button>
+              </div>
+              <div className="flex items-center justify-between text-sm text-neutral-600 dark:text-neutral-400">
+                <span>
+                  Use natural language to describe your CDN configuration
+                </span>
+                <div className="flex items-center gap-2">
+                  {proposedPlan ? (
+                    <>
+                      <Button
+                        size="sm"
+                        onClick={simulatePlan}
+                        className="text-blue-600 border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                        disabled={isGenerating}
+                      >
+                        Simulate
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={applyChanges}
+                        className="text-green-600 border-green-600 hover:bg-green-50 dark:hover:bg-green-900/20"
+                        disabled={isGenerating || !draftVersionId}
+                      >
+                        <CheckCircle size={16} className="mr-1" />
+                        Apply
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={exportRules}
+                        className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                        disabled={isGenerating}
+                      >
+                        Export
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={revertChanges}
+                        className="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
+                        disabled={isGenerating}
+                      >
+                        <ArrowClockwise size={16} className="mr-1" />
+                        Revert
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={rollbackLatest}
+                        className="text-red-600 border-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                        disabled={isGenerating || availableVersions.length < 2}
+                      >
+                        Rollback
+                      </Button>
+                    </>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    onClick={exportRules}
+                    className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                    disabled={isGenerating}
+                  >
+                    Export
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={createPreviewToken}
+                    className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                    disabled={
+                      isGenerating || !activeVersionId || isCreatingToken
+                    }
+                  >
+                    {isCreatingToken ? "Creating..." : "Preview Token"}
+                  </Button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <div className="px-6 py-4 border-b border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
                 Preview Tokens
               </h4>
-              <div className="space-y-2">
+              <span className="text-xs text-neutral-500 dark:text-neutral-400">
+                {previewTokens.length} active
+              </span>
+            </div>
+            {previewTokens.length === 0 ? (
+              <div className="mt-3 rounded border border-dashed border-neutral-200 bg-white p-3 text-sm text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-400">
+                Generate and promote a plan to mint preview tokens.
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2 max-h-56 overflow-auto pr-1">
                 {previewTokens.map((token) => (
                   <div
                     key={token.token}
@@ -1190,11 +1069,8 @@ export default function CDNConfigurator() {
                         {token.token}
                       </div>
                       <div className="text-xs text-neutral-500 dark:text-neutral-400">
-                        Version {token.versionId} - Created{" "}
-                        {new Date(token.createdAt).toLocaleString()}{" "}
-                        {token.expiresAt
-                          ? `- Expires ${new Date(token.expiresAt).toLocaleString()}`
-                          : ""}
+                        Version {token.versionId} · Created{" "}
+                        {new Date(token.createdAt).toLocaleString()}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1207,7 +1083,7 @@ export default function CDNConfigurator() {
                           )
                         }
                       >
-                        Copy Link
+                        Copy
                       </Button>
                       <Button
                         size="sm"
@@ -1220,53 +1096,289 @@ export default function CDNConfigurator() {
                   </div>
                 ))}
               </div>
-            </div>
-          )}
-        </div>
-      </div>
+            )}
+          </div>
 
-      {/* Right Pane - Current Rules */}
-      <div className="w-96 bg-white dark:bg-neutral-950 flex flex-col border-l border-neutral-200 dark:border-neutral-800">
-        <RuleDetailsPanel
-          rule={currentRule ?? null}
-          onSelectRule={setActiveRuleIndex}
-          rules={currentPlan.rules}
-          onResetRule={async (ruleIndex) => {
-            const updated = await resetRule(ruleIndex);
-            setCurrentPlan((_prev) => ({ rules: updated }));
-          }}
-          onUpdateRule={async (ruleIndex, patch) => {
-            const updated = await updateRule(ruleIndex, patch);
-            setCurrentPlan((_prev) => ({ rules: updated }));
-          }}
-          onRemoveRule={async (ruleIndex) => {
-            const updated = await removeRule(ruleIndex);
-            setCurrentPlan((_prev) => ({ rules: updated }));
-          }}
-        />
-        <PlaybooksPanel
-          state={playbookState}
-          onRunPlaybook={async (playbookId) => {
-            const result = await runPlaybook(playbookId);
-            setPlaybookState(result);
-          }}
-          onAdvanceStep={async () => {
-            const next = await advancePlaybookStep();
-            setPlaybookState(next);
-          }}
-        />
-        <div className="p-4 border-t border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400">
-          <div>Version: {previewMetrics.version}</div>
-          <div>
-            Route: {previewMetrics.route.toUpperCase()} - Cache:{" "}
-            {previewMetrics.cacheStatus}
+          {/* Configuration Display */}
+          <div className="flex-1 p-6 overflow-auto">
+            {proposedPlan ? (
+              <div className="space-y-4">
+                <h3 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
+                  Proposed Changes
+                </h3>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                      Active Version
+                    </div>
+                    <div className="font-mono text-neutral-800 dark:text-neutral-200 text-xs">
+                      {activeVersionId ?? "none"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                      Draft Version
+                    </div>
+                    <div className="font-mono text-neutral-800 dark:text-neutral-200 text-xs">
+                      {draftVersionId ?? "none"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                    <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                      Versions Stored
+                    </div>
+                    <div className="text-neutral-800 dark:text-neutral-200">
+                      {availableVersions.length}
+                    </div>
+                  </div>
+                </div>
+
+                {planInsights && (
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                      <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                        Summary
+                      </div>
+                      <p className="text-neutral-700 dark:text-neutral-200 whitespace-pre-wrap">
+                        {planInsights.summary &&
+                        planInsights.summary.trim().length > 0
+                          ? planInsights.summary
+                          : "Plan generated. Review the proposed configuration below."}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                      <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                        Validation
+                      </div>
+                      {validationErrors.length === 0 &&
+                      validationWarnings.length === 0 ? (
+                        <div className="text-neutral-700 dark:text-neutral-200">
+                          No validation issues detected.
+                        </div>
+                      ) : (
+                        <ul className="space-y-1">
+                          {validationWarnings.map((warn) => (
+                            <li
+                              key={warn}
+                              className="text-amber-600 dark:text-amber-300"
+                            >
+                              Warning: {warn}
+                            </li>
+                          ))}
+                          {validationErrors.map((err) => (
+                            <li
+                              key={err}
+                              className="text-red-600 dark:text-red-300"
+                            >
+                              Error: {err}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900/60">
+                      <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400 mb-1">
+                        Risk
+                      </div>
+                      <div className={`text-lg font-semibold ${riskTone}`}>
+                        {riskLevel ? riskLevel.toUpperCase() : "NOT SCORED"}
+                      </div>
+                      {typeof riskScore === "number" ? (
+                        <div className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
+                          Score {riskScore}/100
+                        </div>
+                      ) : (
+                        <div className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
+                          No risk score available.
+                        </div>
+                      )}
+                      {riskReasons.length > 0 && (
+                        <ul className="mt-2 space-y-1 text-xs text-neutral-600 dark:text-neutral-400">
+                          {riskReasons.map((reason) => (
+                            <li key={reason}>- {reason}</li>
+                          ))}
+                        </ul>
+                      )}
+                      {riskAudit && (
+                        <details className="mt-2 text-xs text-neutral-600 dark:text-neutral-400">
+                          <summary className="cursor-pointer text-neutral-500 dark:text-neutral-300">
+                            View audit notes
+                          </summary>
+                          <div className="mt-2 whitespace-pre-wrap bg-neutral-100 dark:bg-neutral-900/60 p-2 rounded">
+                            {riskAudit}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Diff Display */}
+                <div className="space-y-3">
+                  <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
+                    Current Configuration
+                  </div>
+                  {currentPlan.rules.map((rule, index) => {
+                    const rulePath = extractRulePath(rule);
+                    const itemKey =
+                      rule.id ??
+                      `${rule.type}-${rulePath ?? rule.description ?? index}`;
+                    return (
+                      <div
+                        key={itemKey}
+                        className="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-lg"
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-mono bg-neutral-200 dark:bg-neutral-700 px-2 py-1 rounded">
+                            {rule.type}
+                          </span>
+                          {rulePath && (
+                            <span className="text-xs font-mono text-blue-600 dark:text-blue-400">
+                              {rulePath}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm text-neutral-700 dark:text-neutral-300">
+                          {rule.description}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div className="flex items-center gap-2 my-4">
+                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-600"></div>
+                    <ArrowRight size={16} className="text-neutral-400" />
+                    <div className="flex-1 h-px bg-neutral-300 dark:bg-neutral-600"></div>
+                  </div>
+
+                  <div className="text-sm text-neutral-600 dark:text-neutral-400 mb-2">
+                    Proposed Configuration
+                  </div>
+                  {proposedPlan.rules.map((rule, index) => {
+                    const rulePath = extractRulePath(rule);
+                    const itemKey =
+                      rule.id ??
+                      `${rule.type}-${rulePath ?? rule.description ?? index}`;
+                    return (
+                      <div
+                        key={itemKey}
+                        className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-3 rounded-lg"
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-mono bg-green-200 dark:bg-green-700 px-2 py-1 rounded">
+                            {rule.type}
+                          </span>
+                          {rulePath && (
+                            <span className="text-xs font-mono text-green-600 dark:text-green-400">
+                              {rulePath}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm text-green-700 dark:text-green-300">
+                          {rule.description}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center space-y-4 max-w-md">
+                  <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto">
+                    <svg
+                      width="32"
+                      height="32"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className="text-blue-600 dark:text-blue-400"
+                      role="img"
+                      aria-labelledby="empty-state-icon-title"
+                    >
+                      <title id="empty-state-icon-title">
+                        Edge Composer Placeholder Icon
+                      </title>
+                      <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                    </svg>
+                  </div>
+                  <h3 className="font-medium text-neutral-900 dark:text-neutral-100">
+                    Ready to Optimize
+                  </h3>
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                    Describe your CDN optimization needs in natural language
+                    above. The AI will generate a configuration plan with
+                    performance improvements.
+                  </p>
+                  <div className="text-xs text-neutral-500 dark:text-neutral-500 space-y-1">
+                    <div>
+                      Try: "Cache images for 24 hours and add security headers"
+                    </div>
+                    <div>
+                      Or: "Optimize for e-commerce with fast product loading"
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-          <div>
-            Hits/Misses: {previewMetrics.hitCount}/{previewMetrics.missCount} -
-            P95: {previewMetrics.p95Latency}ms
+        </div>
+
+        {/* Right Pane - Current Rules */}
+        <div className="w-96 bg-white dark:bg-neutral-950 flex flex-col border-l border-neutral-200 dark:border-neutral-800">
+          <RuleDetailsPanel
+            rule={currentRule ?? null}
+            onSelectRule={setActiveRuleIndex}
+            rules={currentPlan.rules}
+            onResetRule={async (ruleIndex) => {
+              const updated = await resetRule(ruleIndex);
+              setCurrentPlan((_prev) => ({ rules: updated }));
+            }}
+            onUpdateRule={async (ruleIndex, patch) => {
+              const updated = await updateRule(ruleIndex, patch);
+              setCurrentPlan((_prev) => ({ rules: updated }));
+            }}
+            onRemoveRule={async (ruleIndex) => {
+              const updated = await removeRule(ruleIndex);
+              setCurrentPlan((_prev) => ({ rules: updated }));
+            }}
+          />
+          <PlaybooksPanel
+            state={playbookState}
+            onRunPlaybook={async (playbookId) => {
+              const result = await runPlaybook(playbookId);
+              setPlaybookState(result);
+            }}
+            onAdvanceStep={async () => {
+              const next = await advancePlaybookStep();
+              setPlaybookState(next);
+            }}
+          />
+          <div className="p-4 border-t border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400">
+            <div>Version: {previewMetrics.version}</div>
+            <div>
+              Route: {previewMetrics.route.toUpperCase()} - Cache:{" "}
+              {previewMetrics.cacheStatus}
+            </div>
+            <div>
+              Hits/Misses: {previewMetrics.hitCount}/{previewMetrics.missCount}{" "}
+              - P95: {previewMetrics.p95Latency}ms
+            </div>
           </div>
         </div>
       </div>
-    </div>
+      <SettingsPanel
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        originInput={originInput}
+        onOriginInputChange={handleOriginInputChange}
+        onSubmit={handleOriginSubmit}
+        onClear={handleOriginClear}
+        originOverride={originOverride}
+        isSaving={isSavingOrigin}
+        isLoading={isLoadingOrigin}
+        error={originError}
+      />
+    </>
   );
 }

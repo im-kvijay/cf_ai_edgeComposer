@@ -148,6 +148,8 @@ let CURRENT_ACTIVE_VERSION: EdgePlanVersion | null = null;
 let CURRENT_DRAFT_VERSION: EdgePlanVersion | null = null;
 let CURRENT_HISTORY: EdgePlanVersion[] = [];
 let CURRENT_TOKENS: PreviewTokenState[] = [];
+let CURRENT_ORIGIN_OVERRIDE: string | null = null;
+let ORIGIN_OVERRIDE_LOADED = false;
 
 const cloneRules = (rules: CDNRule[]): CDNRule[] =>
   rules.map((rule) => JSON.parse(JSON.stringify(rule)) as CDNRule);
@@ -192,6 +194,13 @@ const getDraftVersionResponse = () =>
   CURRENT_DRAFT_VERSION ? cloneVersion(CURRENT_DRAFT_VERSION) : null;
 
 const getVersionsResponse = () => CURRENT_HISTORY.map(cloneVersion);
+
+const setFallbackOrigin = (origin: string | null) => {
+  CURRENT_ORIGIN_OVERRIDE = origin?.trim() ? origin.trim() : null;
+  ORIGIN_OVERRIDE_LOADED = true;
+};
+
+const getFallbackOrigin = () => CURRENT_ORIGIN_OVERRIDE;
 
 type GenerateTextParams = Parameters<typeof generateText>[0];
 type GenerateTextResult = Awaited<ReturnType<typeof generateText>>;
@@ -347,6 +356,63 @@ async function handleAPI(request: Request, env: Env): Promise<Response> {
     pruneExpiredTokens();
     CURRENT_TOKENS = CURRENT_TOKENS.filter((entry) => entry.token !== token);
     return Response.json({ token, deleted: true });
+  }
+
+  if (path === "/api/origin" && method === "GET") {
+    if (env.ORIGIN_URL) return Response.json({ origin: env.ORIGIN_URL });
+    if (hasConfigDO) {
+      const result = await forward("/origin");
+      if (result.ok) {
+        const data = (await result.clone().json()) as {
+          origin?: string | null;
+        };
+        const origin =
+          typeof data.origin === "string" && data.origin.trim().length > 0
+            ? data.origin.trim()
+            : null;
+        setFallbackOrigin(origin);
+      }
+      return result;
+    }
+    return Response.json({ origin: getFallbackOrigin() });
+  }
+
+  if (path === "/api/origin" && method === "POST") {
+    const body = (await request.json()) as { origin?: string };
+    const trimmed = typeof body.origin === "string" ? body.origin.trim() : "";
+    if (hasConfigDO) {
+      const result = await forward("/origin", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ origin: trimmed })
+      });
+      if (result.ok) {
+        const data = (await result.clone().json()) as {
+          origin?: string | null;
+        };
+        const origin =
+          typeof data.origin === "string" && data.origin.trim().length > 0
+            ? data.origin.trim()
+            : null;
+        setFallbackOrigin(origin);
+      }
+      return result;
+    }
+    const origin = trimmed.length > 0 ? trimmed : null;
+    setFallbackOrigin(origin);
+    return Response.json({ origin });
+  }
+
+  if (path === "/api/origin" && method === "DELETE") {
+    if (hasConfigDO) {
+      const result = await forward("/origin", { method: "DELETE" });
+      if (result.ok) {
+        setFallbackOrigin(null);
+      }
+      return result;
+    }
+    setFallbackOrigin(null);
+    return Response.json({ origin: null });
   }
 
   if (path === "/api/active" && method === "GET") {
@@ -1175,6 +1241,36 @@ async function getCurrent(env: Env): Promise<Response> {
 
 const CONFIG_DO_NAME = "edge-config";
 
+async function loadOriginOverride(env: Env): Promise<string | null> {
+  if (env.ORIGIN_URL) {
+    ORIGIN_OVERRIDE_LOADED = true;
+    return env.ORIGIN_URL;
+  }
+  if (ORIGIN_OVERRIDE_LOADED) {
+    return CURRENT_ORIGIN_OVERRIDE;
+  }
+  if (env.ConfigDO) {
+    try {
+      const id = env.ConfigDO.idFromName(CONFIG_DO_NAME);
+      const stub = env.ConfigDO.get(id);
+      const res = await stub.fetch("https://config/origin");
+      if (res.ok) {
+        const data = (await res.json()) as { origin?: string | null };
+        const origin =
+          typeof data.origin === "string" && data.origin.trim().length > 0
+            ? data.origin.trim()
+            : null;
+        setFallbackOrigin(origin);
+        return origin;
+      }
+    } catch (error) {
+      console.warn("origin lookup failed", error);
+    }
+  }
+  ORIGIN_OVERRIDE_LOADED = true;
+  return CURRENT_ORIGIN_OVERRIDE;
+}
+
 async function persistDraftPlan(
   env: Env,
   plan: EdgePlan,
@@ -1373,7 +1469,8 @@ async function applyEdgeRuntime(
     return Response.redirect(redirectLocation, 302);
   }
 
-  if (!env.ORIGIN_URL) {
+  const originBase = await loadOriginOverride(env);
+  if (!originBase) {
     const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
     headersToRemove.forEach((header) => {
       headers.delete(header);
@@ -1396,7 +1493,7 @@ async function applyEdgeRuntime(
 
   const originUrlString = new URL(
     targetUrl.pathname + targetUrl.search + targetUrl.hash,
-    env.ORIGIN_URL
+    originBase
   ).toString();
   const initHeaders = new Headers(request.headers);
   const fetchInit: RequestInit = {

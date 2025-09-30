@@ -21,8 +21,12 @@ rm -rf node_modules/.cache .vite .parcel-cache
 log "Ensuring dependencies are installed..."
 npm install
 
-log "Running npm run build..."
-npm run build
+if ACCOUNT_INFO=$(npx --yes wrangler whoami 2>/dev/null); then
+  ACCOUNT_LINE="$(printf '%s' "$ACCOUNT_INFO" | head -n 1)"
+  log "Wrangler authenticated (${ACCOUNT_LINE}). Remote dev + Workers AI are available."
+else
+  log "Wrangler not logged in. Running in local-only mode. Run 'npx wrangler login' to enable Workers AI."
+fi
 
-log "Starting npm run dev..."
-npm run dev
+log "Starting full dev environment (worker + frontend)..."
+exec npm run start

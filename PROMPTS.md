@@ -45,3 +45,5 @@ work on adding new API features, I will be going through and fixing your work. d
 alright this is gonna be a long one so you need to be smart about it. first, delete all unneccessary files (make sure they are truly unneeded), then clean up all our current code files (easier to read etc etc), remove all excess lines that dont serve a purpose. and then report back on what is left to be done, and what exactly you cleared.
 
 complete a full code audit, checking for errors and other potential bottlenecks.
+
+add a quick method to define ORIGIN_URL via the UI

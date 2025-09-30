@@ -13,6 +13,7 @@ const VERSION_PREFIX = "version:" as const;
 const TOKEN_PREFIX = "token:" as const;
 const ACTIVE_KEY = "active" as const;
 const DRAFT_KEY = "draft" as const;
+const ORIGIN_KEY = "origin" as const;
 
 interface SavePlanRequest {
   plan: EdgePlan;
@@ -67,6 +68,7 @@ export class ConfigDO extends DurableObject {
           return this.getVersion(id);
         }
         if (path === "/tokens") return this.listTokens();
+        if (path === "/origin") return this.getOrigin();
       }
 
       if (method === "POST") {
@@ -82,11 +84,17 @@ export class ConfigDO extends DurableObject {
           return this.simulatePlan(
             body as { plan: EdgePlan; currentVersionId?: string }
           );
+        if (path === "/origin")
+          return this.setOrigin(body as { origin?: string });
       }
 
       if (method === "DELETE" && path.startsWith("/token/")) {
         const token = path.split("/")[2];
         return this.deleteToken(token);
+      }
+
+      if (method === "DELETE" && path === "/origin") {
+        return this.clearOrigin();
       }
 
       return new Response("Not Found", { status: 404 });
@@ -225,6 +233,28 @@ export class ConfigDO extends DurableObject {
     return Response.json({
       tokens: Array.from(tokens.values()).filter(Boolean)
     });
+  }
+
+  private async getOrigin(): Promise<Response> {
+    const origin = await this.state.storage.get<string>(ORIGIN_KEY);
+    return Response.json({
+      origin: typeof origin === "string" ? origin : null
+    });
+  }
+
+  private async setOrigin(body: { origin?: string }): Promise<Response> {
+    const raw = typeof body.origin === "string" ? body.origin.trim() : "";
+    if (!raw) {
+      await this.state.storage.delete(ORIGIN_KEY);
+      return Response.json({ origin: null });
+    }
+    await this.state.storage.put(ORIGIN_KEY, raw);
+    return Response.json({ origin: raw });
+  }
+
+  private async clearOrigin(): Promise<Response> {
+    await this.state.storage.delete(ORIGIN_KEY);
+    return Response.json({ origin: null });
   }
 
   private async createToken(body: CreateTokenRequest): Promise<Response> {
