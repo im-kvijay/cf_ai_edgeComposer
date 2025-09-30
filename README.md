@@ -2,7 +2,7 @@
 
 ## Summary
 
-- This is an AI-powered CDN optimization program.
+- This is an AI-powered CDN (Content Delivery Network) optimization program.
 - It serves to create and test CDN rules from your natural language input via Llama 3.3 70B served on cloudflare-workers.
 - You can view risk metrics, insights, and even export your rules through this program.
 - Built on top of the starter agents-starter github repository created by cloudflare.
