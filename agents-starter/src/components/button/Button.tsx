@@ -90,12 +90,13 @@ const ButtonComponent = ({
   );
 };
 
-export const Button = ({ ...props }: ButtonProps) => {
-  return props.tooltip ? (
-    <Tooltip content={props.tooltip} className={props.className} id={props.id}>
-      <ButtonComponent {...props} className={undefined} />
+export const Button = ({ tooltip, className, id, ...props }: ButtonProps) => {
+  const button = <ButtonComponent {...props} id={id} className={className} />;
+  return tooltip ? (
+    <Tooltip content={tooltip} id={id}>
+      {button}
     </Tooltip>
   ) : (
-    <ButtonComponent {...props} />
+    button
   );
 };

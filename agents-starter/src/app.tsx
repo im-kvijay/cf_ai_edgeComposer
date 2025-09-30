@@ -927,7 +927,11 @@ export default function CDNConfigurator() {
                 >
                   <Gear size={18} />
                 </Button>
-                <Button size="sm" onClick={toggleTheme}>
+                <Button
+                  size="sm"
+                  onClick={toggleTheme}
+                  tooltip="Toggle light or dark theme"
+                >
                   {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
                 </Button>
               </div>
@@ -943,7 +947,7 @@ export default function CDNConfigurator() {
           {/* Chat Input */}
           <div className="p-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
             <form onSubmit={handleSubmit} className="space-y-3">
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-stretch">
                 <div className="flex-1">
                   <Textarea
                     placeholder="Describe your CDN optimization needs... (e.g., 'Cache images for 24 hours and optimize for mobile')"
@@ -955,9 +959,11 @@ export default function CDNConfigurator() {
                 </div>
                 <Button
                   type="submit"
-                  size="lg"
-                  className={`px-6 ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
+                  className={`px-6 min-h-[80px] ${
+                    isGenerating ? "opacity-50 cursor-not-allowed" : ""
+                  }`}
                   disabled={!input.trim() || isGenerating}
+                  tooltip="Generate a new draft plan"
                 >
                   {isGenerating ? (
                     <span className="flex items-center gap-2">
@@ -982,6 +988,7 @@ export default function CDNConfigurator() {
                         onClick={simulatePlan}
                         className="text-blue-600 border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20"
                         disabled={isGenerating}
+                        tooltip="Simulate the draft against metrics"
                       >
                         Simulate
                       </Button>
@@ -990,6 +997,7 @@ export default function CDNConfigurator() {
                         onClick={applyChanges}
                         className="text-green-600 border-green-600 hover:bg-green-50 dark:hover:bg-green-900/20"
                         disabled={isGenerating || !draftVersionId}
+                        tooltip="Apply the draft to your active plan"
                       >
                         <CheckCircle size={16} className="mr-1" />
                         Apply
@@ -999,6 +1007,7 @@ export default function CDNConfigurator() {
                         onClick={exportRules}
                         className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
                         disabled={isGenerating}
+                        tooltip="Download the draft as JSON"
                       >
                         Export
                       </Button>
@@ -1007,6 +1016,7 @@ export default function CDNConfigurator() {
                         onClick={revertChanges}
                         className="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
                         disabled={isGenerating}
+                        tooltip="Discard the draft and keep current"
                       >
                         <ArrowClockwise size={16} className="mr-1" />
                         Revert
@@ -1016,19 +1026,22 @@ export default function CDNConfigurator() {
                         onClick={rollbackLatest}
                         className="text-red-600 border-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
                         disabled={isGenerating || availableVersions.length < 2}
+                        tooltip="Restore the previous saved version"
                       >
                         Rollback
                       </Button>
                     </>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    onClick={exportRules}
-                    className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
-                    disabled={isGenerating}
-                  >
-                    Export
-                  </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={exportRules}
+                      className="text-neutral-600 border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-900/20"
+                      disabled={isGenerating}
+                      tooltip="Download the active plan as JSON"
+                    >
+                      Export
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     onClick={createPreviewToken}
@@ -1036,6 +1049,7 @@ export default function CDNConfigurator() {
                     disabled={
                       isGenerating || !activeVersionId || isCreatingToken
                     }
+                    tooltip="Mint a temporary preview token"
                   >
                     {isCreatingToken ? "Creating..." : "Preview Token"}
                   </Button>
