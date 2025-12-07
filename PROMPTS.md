@@ -49,3 +49,5 @@ complete a full code audit, checking for errors and other potential bottlenecks.
 add a quick method to define ORIGIN_URL via the UI
 
 without changing any of the content of the readme, clean it up to be easier on the eyes.
+
+clean up UI for ease of use
