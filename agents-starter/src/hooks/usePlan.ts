@@ -3,6 +3,8 @@ import { api } from '../api/client';
 import type { Plan, PlanVersion, Rule, PlanInsights, TodoItem, ResearchNote, Playbook, ToolTrace } from '../types';
 import { generateId } from '../utils/formatters';
 
+import type { PlaybookScenario, PlaybookStep } from '../types';
+
 interface UsePlanReturn {
   // State
   activePlan: PlanVersion | null;
@@ -29,6 +31,11 @@ interface UsePlanReturn {
   removeRule: (ruleId: string) => void;
   addRule: (rule: Rule) => void;
   reorderRules: (fromIndex: number, toIndex: number) => void;
+
+  // Playbook actions
+  startPlaybook: (scenario: PlaybookScenario, steps: PlaybookStep[], rules: Rule[]) => Promise<void>;
+  advancePlaybookStep: () => void;
+  cancelPlaybook: () => void;
 
   // Refresh
   refresh: () => Promise<void>;
@@ -205,6 +212,80 @@ export function usePlan(): UsePlanReturn {
     });
   }, []);
 
+  // Playbook management
+  const startPlaybook = useCallback(async (scenario: PlaybookScenario, steps: PlaybookStep[], rules: Rule[]) => {
+    // Create the playbook
+    const newPlaybook: Playbook = {
+      id: generateId(),
+      title: `${scenario.charAt(0).toUpperCase()}${scenario.slice(1)} Setup`,
+      scenario,
+      steps: steps.map((step, index) => ({
+        ...step,
+        status: index === 0 ? 'running' : 'pending',
+      })),
+      activeStepIndex: 0,
+      startedAt: new Date().toISOString(),
+    };
+    setPlaybook(newPlaybook);
+
+    // Create draft plan with rules
+    const newPlan: Plan = {
+      id: generateId(),
+      rules: rules.map((rule) => ({ ...rule, id: rule.id || generateId() })),
+      createdAt: new Date().toISOString(),
+      summary: `${scenario} configuration playbook`,
+    };
+    setDraftPlan(newPlan);
+
+    // Save to backend so it can be promoted
+    try {
+      const result = await api.saveDraft(newPlan, `${scenario} playbook configuration`);
+      if (result.draft) {
+        setDraftVersionId(result.draft.id);
+      }
+    } catch (error) {
+      console.error('Failed to save playbook draft:', error);
+    }
+  }, []);
+
+  const advancePlaybookStep = useCallback(() => {
+    setPlaybook((prev) => {
+      if (!prev) return prev;
+
+      const currentIndex = prev.activeStepIndex;
+      const steps = [...prev.steps];
+
+      // Mark current step as completed
+      if (steps[currentIndex]) {
+        steps[currentIndex] = { ...steps[currentIndex], status: 'completed' };
+      }
+
+      // Check if we've completed all steps
+      const nextIndex = currentIndex + 1;
+      if (nextIndex >= steps.length) {
+        return {
+          ...prev,
+          steps,
+          activeStepIndex: steps.length,
+          completedAt: new Date().toISOString(),
+        };
+      }
+
+      // Mark next step as running
+      steps[nextIndex] = { ...steps[nextIndex], status: 'running' };
+
+      return {
+        ...prev,
+        steps,
+        activeStepIndex: nextIndex,
+      };
+    });
+  }, []);
+
+  const cancelPlaybook = useCallback(() => {
+    setPlaybook(null);
+  }, []);
+
   return {
     activePlan,
     draftPlan,
@@ -226,6 +307,9 @@ export function usePlan(): UsePlanReturn {
     removeRule,
     addRule,
     reorderRules,
+    startPlaybook,
+    advancePlaybookStep,
+    cancelPlaybook,
     refresh,
   };
 }

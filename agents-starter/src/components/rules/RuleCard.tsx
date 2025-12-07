@@ -1,4 +1,5 @@
-import { Trash, PencilSimple, Copy, DotsThreeVertical } from '@phosphor-icons/react';
+import { useState } from 'react';
+import { Trash, Copy, DotsThree } from '@phosphor-icons/react';
 import type { Rule } from '../../types';
 import { Badge } from '../common/Badge';
 import { Button } from '../common/Button';
@@ -11,7 +12,6 @@ interface RuleCardProps {
   isSelected?: boolean;
   isDraft?: boolean;
   onSelect?: () => void;
-  onEdit?: () => void;
   onDelete?: () => void;
   onDuplicate?: () => void;
 }
@@ -22,10 +22,13 @@ export function RuleCard({
   isSelected = false,
   isDraft = false,
   onSelect,
-  onEdit,
   onDelete,
   onDuplicate,
 }: RuleCardProps) {
+  const [showActions, setShowActions] = useState(false);
+
+  const hasActions = onDelete || onDuplicate;
+
   return (
     <div
       className={cn(
@@ -33,7 +36,7 @@ export function RuleCard({
         isSelected
           ? 'border-blue-400 bg-blue-50/50 dark:border-blue-600 dark:bg-blue-900/20'
           : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700',
-        isDraft && 'border-l-4 border-l-yellow-400 dark:border-l-yellow-500'
+        isDraft && 'border-l-4 border-l-amber-400 dark:border-l-amber-500'
       )}
       onClick={onSelect}
     >
@@ -46,53 +49,73 @@ export function RuleCard({
           <Badge size="sm" className={getRuleTypeColor(rule.type)}>
             {rule.type}
           </Badge>
+          {isDraft && (
+            <Badge size="sm" variant="warning">
+              draft
+            </Badge>
+          )}
         </div>
 
-        {/* Actions */}
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {onEdit && (
+        {/* Actions Menu Button - Always visible */}
+        {hasActions && (
+          <div className="relative">
             <Button
               variant="ghost"
               size="sm"
               onClick={(e) => {
                 e.stopPropagation();
-                onEdit();
+                setShowActions(!showActions);
               }}
               className="h-6 w-6 p-0"
-              aria-label="Edit rule"
+              aria-label="Rule actions"
             >
-              <PencilSimple size={14} />
+              <DotsThree size={16} weight="bold" />
             </Button>
-          )}
-          {onDuplicate && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDuplicate();
-              }}
-              className="h-6 w-6 p-0"
-              aria-label="Duplicate rule"
-            >
-              <Copy size={14} />
-            </Button>
-          )}
-          {onDelete && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }}
-              className="h-6 w-6 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-              aria-label="Delete rule"
-            >
-              <Trash size={14} />
-            </Button>
-          )}
-        </div>
+
+            {/* Dropdown Menu */}
+            {showActions && (
+              <>
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowActions(false);
+                  }}
+                />
+                <div className="absolute right-0 top-7 z-20 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-1 min-w-[120px]">
+                  {onDuplicate && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDuplicate();
+                        setShowActions(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                    >
+                      <Copy size={14} />
+                      Duplicate
+                    </button>
+                  )}
+                  {onDelete && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete();
+                        setShowActions(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                    >
+                      <Trash size={14} />
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Title & Subtitle */}

@@ -6,3 +6,4 @@ export { Tabs, TabList, Tab, TabPanel } from './Tabs';
 export { Input, Textarea } from './Input';
 export { StatusIndicator } from './StatusIndicator';
 export { EmptyState } from './EmptyState';
+export { ToastProvider, useToast } from './Toast';

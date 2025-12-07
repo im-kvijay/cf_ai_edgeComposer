@@ -7,6 +7,8 @@ import {
   CheckCircle,
   Circle,
   Spinner,
+  X,
+  ArrowRight,
 } from '@phosphor-icons/react';
 import type { Playbook, PlaybookScenario } from '../../types';
 import { Panel, PanelSection } from '../layout/Panel';
@@ -18,6 +20,7 @@ interface PlaybooksPanelProps {
   activePlaybook: Playbook | null;
   onStartPlaybook: (scenario: PlaybookScenario) => void;
   onAdvanceStep: () => void;
+  onCancelPlaybook?: () => void;
   isLoading?: boolean;
 }
 
@@ -57,13 +60,16 @@ export function PlaybooksPanel({
   activePlaybook,
   onStartPlaybook,
   onAdvanceStep,
+  onCancelPlaybook,
   isLoading = false,
 }: PlaybooksPanelProps) {
+  const isCompleted = activePlaybook && activePlaybook.activeStepIndex >= activePlaybook.steps.length;
+
   return (
     <Panel title="Playbooks" className="h-full overflow-y-auto" noPadding>
       <div className="p-4 space-y-4">
         {/* Playbook Options */}
-        <PanelSection title="Quick Start">
+        <PanelSection title={activePlaybook ? 'Active Playbook' : 'Quick Start'}>
           <div className="grid grid-cols-2 gap-2">
             {PLAYBOOK_OPTIONS.map((option) => {
               const Icon = option.icon;
@@ -164,22 +170,59 @@ export function PlaybooksPanel({
               })}
             </div>
 
-            <div className="mt-4">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={onAdvanceStep}
-                disabled={
-                  isLoading ||
-                  activePlaybook.activeStepIndex >= activePlaybook.steps.length
-                }
-                leftIcon={<Play size={14} weight="fill" />}
-                className="w-full"
-              >
-                {activePlaybook.activeStepIndex >= activePlaybook.steps.length - 1
-                  ? 'Complete'
-                  : 'Advance Step'}
-              </Button>
+            <div className="mt-4 flex gap-2">
+              {!isCompleted && (
+                <>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={onAdvanceStep}
+                    disabled={isLoading}
+                    leftIcon={
+                      activePlaybook.activeStepIndex >= activePlaybook.steps.length - 1
+                        ? <CheckCircle size={14} weight="fill" />
+                        : <ArrowRight size={14} weight="bold" />
+                    }
+                    className="flex-1"
+                  >
+                    {activePlaybook.activeStepIndex >= activePlaybook.steps.length - 1
+                      ? 'Complete'
+                      : 'Next Step'}
+                  </Button>
+                  {onCancelPlaybook && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={onCancelPlaybook}
+                      disabled={isLoading}
+                      leftIcon={<X size={14} />}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </>
+              )}
+              {isCompleted && (
+                <div className="flex-1 text-center py-2">
+                  <div className="flex items-center justify-center gap-2 text-green-600 dark:text-green-400">
+                    <CheckCircle size={20} weight="fill" />
+                    <span className="font-medium">Playbook Complete!</span>
+                  </div>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    Review your rules and promote when ready.
+                  </p>
+                  {onCancelPlaybook && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={onCancelPlaybook}
+                      className="mt-2"
+                    >
+                      Start New Playbook
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           </PanelSection>
         )}
